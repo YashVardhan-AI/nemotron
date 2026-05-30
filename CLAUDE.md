@@ -15,3 +15,4 @@ Formatting
 - Type checking: uv run --frozen mypy *.py
 
 To start the server, do `./serve.sh`
+
