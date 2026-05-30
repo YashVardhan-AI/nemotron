@@ -1,3 +1,5 @@
+import pytest
+
 from val.generators import GENERATORS
 from val.generators.bit_manipulation import build_rule, generate, rule_signature
 
@@ -53,3 +55,9 @@ def test_prompt_uses_real_template_markers():
     )
     assert "Here are some examples of input -> output:" in p.prompt
     assert "Now, determine the output for:" in p.prompt
+
+
+def test_generate_rejects_impossible_difficulty():
+    # 8-bit pool has only 256 values; difficulty+1 > 256 must raise, not hang.
+    with pytest.raises(ValueError):
+        generate(seed=1, difficulty=256)

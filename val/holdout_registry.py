@@ -24,5 +24,6 @@ class HoldoutRegistry:
         return True
 
     def _flush(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         serializable = {cat: sorted(sigs) for cat, sigs in self._data.items()}
         self.path.write_text(json.dumps(serializable, indent=2))

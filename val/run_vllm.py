@@ -11,6 +11,7 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
+from reasoners.store_types import Problem
 from val.generators import GENERATORS
 from val.holdout_registry import HoldoutRegistry
 from val.real_holdout import holdout_problems
@@ -46,6 +47,10 @@ def make_vllm_predictor(
     def predict(user_contents: list[str]) -> list[str]:
         prompts = []
         for content in user_contents:
+            # nb: a broad bare-except is blocked by the repo hook; this explicit
+            # tuple covers the known apply_chat_template failure modes. A malformed
+            # Jinja template (jinja2.TemplateError) would fall through, but the
+            # eval models have well-formed templates.
             try:
                 prompt = tokenizer.apply_chat_template(
                     [{"role": "user", "content": content}],
@@ -68,7 +73,7 @@ def make_vllm_predictor(
 
 def build_synthetic_valset(
     per_category: int, difficulty: int, registry: HoldoutRegistry
-):
+) -> list[Problem]:
     """Generate fresh new-rule problems from every registered generator and
     reserve each rule's signature so it can never enter training generation."""
     problems = []

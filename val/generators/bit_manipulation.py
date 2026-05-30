@@ -70,6 +70,8 @@ def rule_signature(seed: int) -> str:
 
 
 def _distinct_inputs(seed: int, count: int) -> list[int]:
+    if count > 256:
+        raise ValueError(f"count={count} exceeds the 8-bit value pool (256)")
     rng = random.Random(seed * 1000 + 1)  # separate stream from the rule
     seen: list[int] = []
     while len(seen) < count:
