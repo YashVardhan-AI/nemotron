@@ -29,4 +29,4 @@ def register(
 
 
 # Import generator modules so they self-register on `import val.generators`.
-from val.generators import cipher  # noqa: E402,F401
+from val.generators import bit_manipulation, cipher  # noqa: E402,F401
