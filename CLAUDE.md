@@ -14,3 +14,9 @@ Formatting
 - Sort imports: uv run --frozen ruff check --select I *.py --fix
 - Type checking: uv run --frozen mypy *.py
 
+Version Control
+- Use git at each stage: commit after completing each step/task, not in one big batch
+- Make a checkpoint commit before destructive or hard-to-reverse changes (deletions, bulk edits)
+- One logical change per commit, with a clear message describing what and why
+- Verify (tests/format pass) before committing
+
