@@ -1,5 +1,8 @@
 .DS_Store
 env.json
+val/demo_report.json
+val/holdout_rules.json
+val_report_*.json
 .claude/settings.local.json
 .venv/
 .pytest_cache/
