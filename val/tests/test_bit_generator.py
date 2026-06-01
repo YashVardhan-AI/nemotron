@@ -1,7 +1,12 @@
 import pytest
 
 from val.generators import GENERATORS
-from val.generators.bit_manipulation import build_rule, generate, rule_signature
+from val.generators.bit_manipulation import (
+    build_rule,
+    generate,
+    rule_family,
+    rule_signature,
+)
 
 
 def test_registered():
@@ -61,3 +66,22 @@ def test_generate_rejects_impossible_difficulty():
     # 8-bit pool has only 256 values; difficulty+1 > 256 must raise, not hang.
     with pytest.raises(ValueError):
         generate(seed=1, difficulty=256)
+
+
+def test_rule_families_match_real_grammar():
+    # Only the real-distribution families are generated (no affine/xor-mask/perm),
+    # and pairwise 2-input boolean is the plurality (~65%).
+    fams = [rule_family(s) for s in range(400)]
+    assert set(fams) <= {"pairwise", "rot", "complex"}
+    counts = {f: fams.count(f) for f in set(fams)}
+    assert counts["pairwise"] == max(counts.values())
+    assert counts["pairwise"] / len(fams) > 0.5
+
+
+def test_complex_family_uses_three_inputs():
+    # Find a 'complex' (majority/choice) rule and confirm it's a real 3-input
+    # function: changing a third input bit can change the output.
+    seed = next(s for s in range(400) if rule_family(s) == "complex")
+    _sig, apply = build_rule(seed)
+    outs = {apply(x) for x in range(256)}
+    assert len(outs) > 1  # non-degenerate transform

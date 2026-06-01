@@ -1,10 +1,17 @@
-"""Second generator: brand-new 8-bit transformation rules.
+"""Generator: new 8-bit rules drawn from the REAL bit_manipulation grammar.
 
-Rule families (all deterministic, answer correct by construction):
-  affine : out = (a*x + b) % 256        (a odd)
-  xor    : out = x ^ mask
-  rotl   : out = rotate-left(x, k)       (8-bit)
-  perm   : out bit j = in bit perm[j]    (MSB-first indexing)
+Empirically (1,602 train problems, and the solver's 85% rule_found rate), real
+bit rules are overwhelmingly **per-output-bit functions of a few input bits**:
+  ~65%  pairwise 2-input boolean   out[j] = op(in[a+j], in[b+j]), op in
+                                   {AND, OR, XOR, AND-NOT, OR-NOT, XOR-NOT}
+  ~20%  rotation / shift (+NOT)    out[j] = in[(j+k) % 8]   (the routing bulk)
+  ~15%  complex 3-input            majority / choice of three input bits
+                                   (the hard tail the 2-input solver can't express)
+Affine-mod-256, xor-mask and arbitrary permutations are ~0% of real data, so we
+do NOT generate them (an earlier version did, which made the eval out-of-distribution).
+All rules are stride-structured (offset + j) so they're well-determined from a
+handful of demos, matching the solver's run-based problems. Answers are correct
+by construction.
 """
 
 import random
@@ -19,54 +26,101 @@ _HEADER = (
     "rotations, XOR, AND, OR, NOT, and possibly majority or choice functions."
 )
 
-_RULE_TYPES = ["affine", "xor", "rotl", "perm"]
+_PAIR_OPS = ("AND", "OR", "XOR", "AND-NOT", "OR-NOT", "XOR-NOT")
+
+
+def _bit(x: int, p: int) -> int:
+    return (x >> (7 - p)) & 1
+
+
+def _pack(bits: list[int]) -> int:
+    out = 0
+    for j in range(8):
+        out |= bits[j] << (7 - j)
+    return out
+
+
+def _pair_apply(op: str, a: int, b: int) -> Callable[[int], int]:
+    base = op.split("-")[0]
+    neg = op.endswith("-NOT")
+
+    def apply(x: int) -> int:
+        bits = []
+        for j in range(8):
+            u = _bit(x, (a + j) % 8)
+            v = _bit(x, (b + j) % 8)
+            if neg:
+                v = 1 - v
+            if base == "AND":
+                r = u & v
+            elif base == "OR":
+                r = u | v
+            else:  # XOR
+                r = u ^ v
+            bits.append(r)
+        return _pack(bits)
+
+    return apply
+
+
+def _rot_apply(k: int, inv: bool) -> Callable[[int], int]:
+    def apply(x: int) -> int:
+        bits = [_bit(x, (j + k) % 8) for j in range(8)]
+        if inv:
+            bits = [1 - b for b in bits]
+        return _pack(bits)
+
+    return apply
+
+
+def _complex_apply(kind: str, a: int, b: int, c: int) -> Callable[[int], int]:
+    def apply(x: int) -> int:
+        bits = []
+        for j in range(8):
+            p = _bit(x, (a + j) % 8)
+            q = _bit(x, (b + j) % 8)
+            s = _bit(x, (c + j) % 8)
+            if kind == "MAJ":
+                r = 1 if (p + q + s) >= 2 else 0
+            else:  # CHOICE: p selects q else s
+                r = q if p else s
+            bits.append(r)
+        return _pack(bits)
+
+    return apply
 
 
 def build_rule(seed: int) -> tuple[str, Callable[[int], int]]:
-    """Return (canonical_signature, apply) for the rule selected by *seed*."""
+    """Return (canonical_signature, apply) for the rule selected by *seed*.
+
+    Family weights match the real distribution: ~65% pairwise, ~20% rotation,
+    ~15% complex (3-input majority/choice).
+    """
     rng = random.Random(seed)
-    rule_type = rng.choice(_RULE_TYPES)
-
-    if rule_type == "affine":
-        a = rng.choice([3, 5, 7, 9, 11, 13, 15])
-        b = rng.randint(1, 255)
-        signature = f"affine:a={a},b={b}"
-
-        def apply(x: int) -> int:
-            return (a * x + b) & 0xFF
-
-    elif rule_type == "xor":
-        mask = rng.randint(1, 255)
-        signature = f"xor:{mask}"
-
-        def apply(x: int) -> int:
-            return x ^ mask
-
-    elif rule_type == "rotl":
+    roll = rng.random()
+    if roll < 0.65:
+        op = rng.choice(_PAIR_OPS)
+        a = rng.randint(0, 7)
+        b = (a + rng.randint(1, 7)) % 8  # b != a
+        return f"pairwise:{op},a={a},b={b}", _pair_apply(op, a, b)
+    if roll < 0.85:
         k = rng.randint(1, 7)
-        signature = f"rotl:{k}"
-
-        def apply(x: int) -> int:
-            return ((x << k) | (x >> (8 - k))) & 0xFF
-
-    else:  # perm
-        perm = list(range(8))
-        rng.shuffle(perm)
-        signature = "perm:" + ",".join(str(i) for i in perm)
-
-        def apply(x: int) -> int:
-            in_bits = [(x >> (7 - i)) & 1 for i in range(8)]
-            out_bits = [in_bits[perm[j]] for j in range(8)]
-            out = 0
-            for j in range(8):
-                out |= out_bits[j] << (7 - j)
-            return out
-
-    return signature, apply
+        inv = rng.random() < 0.3
+        return f"rot:k={k},inv={int(inv)}", _rot_apply(k, inv)
+    kind = rng.choice(("MAJ", "CHOICE"))
+    a = rng.randint(0, 7)
+    b = (a + rng.randint(1, 7)) % 8
+    c = (a + rng.randint(1, 7)) % 8
+    return f"complex:{kind},a={a},b={b},c={c}", _complex_apply(kind, a, b, c)
 
 
 def rule_signature(seed: int) -> str:
     return build_rule(seed)[0]
+
+
+def rule_family(seed: int) -> str:
+    """Coarse family label ('pairwise' / 'rot' / 'complex') for breakdowns."""
+    return rule_signature(seed).split(":", 1)[0]
 
 
 def _distinct_inputs(seed: int, count: int) -> list[int]:
@@ -82,7 +136,8 @@ def _distinct_inputs(seed: int, count: int) -> list[int]:
 
 
 def generate(seed: int, difficulty: int) -> Problem:
-    _signature, apply = build_rule(seed)
+    signature, apply = build_rule(seed)
+    family = signature.split(":", 1)[0]
     values = _distinct_inputs(seed, difficulty + 1)
     example_ints, query_int = values[:difficulty], values[difficulty]
 
@@ -103,7 +158,7 @@ def generate(seed: int, difficulty: int) -> Problem:
     )
 
     return Problem(
-        id=f"val-bit_manipulation-{seed}",
+        id=f"val-bit_manipulation-{family}-{seed}",
         category="bit_manipulation",
         examples=examples,
         question=query_bits,

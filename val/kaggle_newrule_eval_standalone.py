@@ -99,6 +99,7 @@ class Problem:
     prompt: str
     answer: str
     n_examples: int  # used as the "difficulty" bucket
+    meta: str = ""  # rule-family tag (e.g. "pairwise"/"rot"/"complex"), for breakdowns
 
 
 # --- cipher: a brand-new substitution alphabet per seed ----------------------
@@ -177,50 +178,95 @@ def generate_cipher(seed, difficulty):
         prompt=prompt,
         answer=plain_query,
         n_examples=difficulty,
+        meta="substitution",
     )
 
 
-# --- bit_manipulation: new 8-bit rules (affine / xor / rotate / permute) -----
+# --- bit_manipulation: rules from the REAL grammar (see analysis) ------------
+# Real train distribution (1,602 problems): ~65% pairwise 2-input boolean,
+# ~20% rotation/shift, ~15% complex 3-input (majority/choice). affine/xor-mask/
+# permutation are ~0% of real data, so we do NOT generate them.
 _BIT_HEADER = (
     "In Alice's Wonderland, a secret bit manipulation rule transforms 8-bit "
     "binary numbers. The transformation involves operations like bit shifts, "
     "rotations, XOR, AND, OR, NOT, and possibly majority or choice functions."
 )
-_BIT_RULE_TYPES = ["affine", "xor", "rotl", "perm"]
+_BIT_PAIR_OPS = ["AND", "OR", "XOR", "AND-NOT", "OR-NOT", "XOR-NOT"]
+
+
+def _bitval(x, p):
+    return (x >> (7 - p)) & 1
+
+
+def _pack(bits):
+    out = 0
+    for j in range(8):
+        out |= bits[j] << (7 - j)
+    return out
 
 
 def build_bit_rule(seed):
-    """Return an apply(x:int)->int for the rule selected by *seed*."""
+    """Return (family, apply) for the rule selected by *seed*.
+
+    family is one of 'pairwise' / 'rot' / 'complex'; apply(x:int)->int.
+    """
     rng = random.Random(seed)
-    rule_type = rng.choice(_BIT_RULE_TYPES)
-    if rule_type == "affine":
-        a = rng.choice([3, 5, 7, 9, 11, 13, 15])
-        b = rng.randint(1, 255)
+    roll = rng.random()
+    if roll < 0.65:  # pairwise 2-input boolean (dominant real family)
+        op = rng.choice(_BIT_PAIR_OPS)
+        a = rng.randint(0, 7)
+        b = (a + rng.randint(1, 7)) % 8
+        base = op.split("-")[0]
+        neg = op.endswith("-NOT")
 
         def apply(x):
-            return (a * x + b) & 0xFF
-    elif rule_type == "xor":
-        mask = rng.randint(1, 255)
-
-        def apply(x):
-            return x ^ mask
-    elif rule_type == "rotl":
-        k = rng.randint(1, 7)
-
-        def apply(x):
-            return ((x << k) | (x >> (8 - k))) & 0xFF
-    else:  # perm — output bit j = input bit perm[j] (MSB-first)
-        perm = list(range(8))
-        rng.shuffle(perm)
-
-        def apply(x):
-            in_bits = [(x >> (7 - i)) & 1 for i in range(8)]
-            out = 0
+            bits = []
             for j in range(8):
-                out |= in_bits[perm[j]] << (7 - j)
-            return out
+                u = _bitval(x, (a + j) % 8)
+                v = _bitval(x, (b + j) % 8)
+                if neg:
+                    v = 1 - v
+                if base == "AND":
+                    r = u & v
+                elif base == "OR":
+                    r = u | v
+                else:
+                    r = u ^ v
+                bits.append(r)
+            return _pack(bits)
 
-    return apply
+        return "pairwise", apply
+    if roll < 0.85:  # rotation / shift (+ optional complement)
+        k = rng.randint(1, 7)
+        inv = rng.random() < 0.3
+
+        def apply(x):
+            bits = [_bitval(x, (j + k) % 8) for j in range(8)]
+            if inv:
+                bits = [1 - b for b in bits]
+            return _pack(bits)
+
+        return "rot", apply
+    # complex 3-input majority / choice (the hard tail; >2 inputs per bit)
+    kind = rng.choice(("MAJ", "CHOICE"))
+    a = rng.randint(0, 7)
+    b = (a + rng.randint(1, 7)) % 8
+    c = (a + rng.randint(1, 7)) % 8
+
+    def apply(x):
+        bits = []
+        for j in range(8):
+            p = _bitval(x, (a + j) % 8)
+            q = _bitval(x, (b + j) % 8)
+            s = _bitval(x, (c + j) % 8)
+            if kind == "MAJ":
+                r = 1 if (p + q + s) >= 2 else 0
+            else:
+                r = q if p else s
+            bits.append(r)
+        return _pack(bits)
+
+    return "complex", apply
 
 
 def _bit_distinct_inputs(seed, count):
@@ -236,7 +282,7 @@ def _bit_distinct_inputs(seed, count):
 
 
 def generate_bit(seed, difficulty):
-    apply = build_bit_rule(seed)
+    family, apply = build_bit_rule(seed)
     values = _bit_distinct_inputs(seed, difficulty + 1)
     example_ints, query_int = values[:difficulty], values[difficulty]
     lines = [f"{format(x, '08b')} -> {format(apply(x), '08b')}" for x in example_ints]
@@ -247,11 +293,12 @@ def generate_bit(seed, difficulty):
         + f"\n\nNow, determine the output for: {query_bits}"
     )
     return Problem(
-        id=f"val-bit_manipulation-{seed}",
+        id=f"val-bit_manipulation-{family}-{seed}",
         category="bit_manipulation",
         prompt=prompt,
         answer=format(apply(query_int), "08b"),
         n_examples=difficulty,
+        meta=family,
     )
 
 
@@ -396,6 +443,7 @@ for bi in range(0, n_total, BATCH_SIZE):
                 "id": p.id,
                 "category": p.category,
                 "difficulty": p.n_examples,
+                "meta": p.meta,
                 "answer": p.answer,
                 "predicted": pred,
                 "correct": ok,
@@ -422,6 +470,29 @@ print("\n" + "=" * 64)
 print("NEW-RULE generalization (synthetic, rules never trained on)")
 print("=" * 64)
 print(format_table(report))
+
+# Per-rule-family breakdown for bit_manipulation (pairwise / rot / complex).
+# Real data is ~65% pairwise, ~20% rot, ~15% complex; 'complex' (3-input
+# majority/choice) is the genuinely hard tail. This isolates where the model
+# actually fails vs the in-distribution families it should handle.
+fam_seen = defaultdict(int)
+fam_hit = defaultdict(int)
+fam_hit_strict = defaultdict(int)
+for r in results:
+    if r["category"] != "bit_manipulation":
+        continue
+    fam_seen[r["meta"]] += 1
+    fam_hit[r["meta"]] += int(r["correct"])
+    fam_hit_strict[r["meta"]] += int(r["correct_strict"])
+if fam_seen:
+    print("\nbit_manipulation by rule family:")
+    print(f"  {'family':<10} {'N':>4} {'Acc%':>7} {'StrictAcc%':>11}")
+    for fam in sorted(fam_seen):
+        n = fam_seen[fam]
+        print(
+            f"  {fam:<10} {n:>4} {fam_hit[fam] / n * 100:>7.1f} "
+            f"{fam_hit_strict[fam] / n * 100:>11.1f}"
+        )
 
 with open(OUT_JSON, "w") as f:
     json.dump(report, f, indent=2)
