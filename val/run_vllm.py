@@ -8,6 +8,7 @@ Usage (on a GPU box):
 """
 
 import argparse
+from collections import defaultdict, deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -84,6 +85,30 @@ def build_synthetic_valset(
     return problems
 
 
+def cap_per_category(problems: list[Problem], limit: int | None) -> list[Problem]:
+    """Keep at most *limit* problems, sampled round-robin across categories.
+
+    A flat head-slice could return a single category; round-robin keeps a small
+    --limit sample category-balanced. Deterministic (categories sorted, original
+    order preserved within each). Returns *problems* unchanged if limit is None
+    or already within the cap.
+    """
+    if limit is None or len(problems) <= limit:
+        return problems
+    buckets: dict[str, deque[Problem]] = defaultdict(deque)
+    for p in problems:
+        buckets[p.category].append(p)
+    queues = [buckets[c] for c in sorted(buckets)]
+    out: list[Problem] = []
+    while len(out) < limit and any(queues):
+        for q in queues:
+            if q:
+                out.append(q.popleft())
+                if len(out) >= limit:
+                    break
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -92,20 +117,30 @@ def main() -> None:
     parser.add_argument("--difficulty", type=int, default=6)
     parser.add_argument("--holdout", default="val/holdout_rules.json")
     parser.add_argument("--out-prefix", default="val_report")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap problems PER holdout (round-robin across categories) for a "
+        "fast first pass; omit to score the full holdouts",
+    )
     args = parser.parse_args()
 
     predictor = make_vllm_predictor(args.model, args.adapter)
 
     # 1) Real snapshot-complement holdout (clean only for the 3 downsampled cats).
     held = holdout_problems()
-    real_problems = [hp.problem for hp in held]
+    real_problems = cap_per_category([hp.problem for hp in held], args.limit)
     real_diff = {p.id: len(p.examples) for p in real_problems}
     real_report = aggregate(score(real_problems, predictor, difficulty=real_diff))
 
     # 2) Synthetic new-rule holdout (the only clean signal on the hard categories).
+    # Reserve ALL generated rules (before the cap) so the holdout list stays
+    # complete even when we only score a sample.
     registry = HoldoutRegistry(Path(args.holdout))
-    synth_problems = build_synthetic_valset(
-        args.per_category, args.difficulty, registry
+    synth_problems = cap_per_category(
+        build_synthetic_valset(args.per_category, args.difficulty, registry),
+        args.limit,
     )
     synth_diff = {p.id: len(p.examples) for p in synth_problems}
     synth_report = aggregate(score(synth_problems, predictor, difficulty=synth_diff))
