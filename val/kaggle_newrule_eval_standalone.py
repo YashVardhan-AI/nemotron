@@ -19,9 +19,12 @@
 
 
 # %% ── Cell 1: config ───────────────────────────────────────────────────────
-ADAPTER_PATH = "/kaggle/working"  # dir with adapter_config.json + adapter_model.safetensors
-PER_CATEGORY = 50                 # how many distinct new rules per generator
-DIFFICULTY = 6                    # in-context examples shown per problem
+ADAPTER_PATH = (
+    "/kaggle/working"  # dir with adapter_config.json + adapter_model.safetensors
+)
+PER_CATEGORY = 50  # how many distinct new rules per generator
+DIFFICULTY = 6  # in-context examples shown per problem
+BATCH_SIZE = 20  # problems per batched llm.generate() call; accuracy prints after each
 OUT_JSON = "/kaggle/working/newrule_report.json"
 
 
@@ -99,11 +102,41 @@ class Problem:
 
 # --- cipher: a brand-new substitution alphabet per seed ----------------------
 _CIPHER_WORDS = [
-    "queen", "dragon", "castle", "secret", "near", "valley", "discovers",
-    "dreams", "inside", "student", "creates", "magical", "door", "golden",
-    "follows", "princess", "reads", "mysterious", "cat", "imagines", "book",
-    "wizard", "the", "guards", "hidden", "garden", "river", "mountain",
-    "whispers", "ancient", "key", "opens", "silver", "gate", "forest",
+    "queen",
+    "dragon",
+    "castle",
+    "secret",
+    "near",
+    "valley",
+    "discovers",
+    "dreams",
+    "inside",
+    "student",
+    "creates",
+    "magical",
+    "door",
+    "golden",
+    "follows",
+    "princess",
+    "reads",
+    "mysterious",
+    "cat",
+    "imagines",
+    "book",
+    "wizard",
+    "the",
+    "guards",
+    "hidden",
+    "garden",
+    "river",
+    "mountain",
+    "whispers",
+    "ancient",
+    "key",
+    "opens",
+    "silver",
+    "gate",
+    "forest",
 ]
 _CIPHER_HEADER = "In Alice's Wonderland, secret encryption rules are used on text."
 
@@ -300,44 +333,91 @@ def format_table(report):
     return "\n".join(lines)
 
 
-# %% ── Cell 5: run — reuse the notebook's `llm`, score new rules, print ───────
+# %% ── Cell 5: run — reuse the notebook's `llm`, batched, accuracy per batch ──
 import json
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
+# NOTE: this cell uses defaultdict / verify / generators etc. defined in Cells
+# 2-4 — run the cells in order (they share the notebook's globals).
+
 assert "llm" in globals(), "Run AFTER the notebook's 'Init vLLM' cell defines `llm`."
 
 _tokenizer = llm.get_tokenizer()  # noqa: F821  (llm is a notebook global)
-_sampling = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=7680)  # greedy, eval config
+_sampling = SamplingParams(
+    temperature=0.0, top_p=1.0, max_tokens=7680
+)  # greedy, eval config
 _lora = LoRARequest("adapter", 1, ADAPTER_PATH)
 
 
-def predict(user_contents):
-    """chat template (w/ thinking) -> greedy -> our adapter; mirrors the eval."""
-    prompts = []
-    for content in user_contents:
+def predict(eval_prompts):
+    """Batched: chat template (w/ thinking) -> greedy -> our adapter. vLLM's
+    continuous batching runs the whole list together (fast)."""
+    rendered = []
+    for ep in eval_prompts:
         try:
-            p = _tokenizer.apply_chat_template(
-                [{"role": "user", "content": content}],
+            r = _tokenizer.apply_chat_template(
+                [{"role": "user", "content": ep}],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=True,
             )
         except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
-            p = content
-        prompts.append(p)
-    outputs = llm.generate(prompts, sampling_params=_sampling, lora_request=_lora)  # noqa: F821
+            r = ep
+        rendered.append(r)
+    outputs = llm.generate(  # noqa: F821
+        rendered, sampling_params=_sampling, lora_request=_lora
+    )
     return [o.outputs[0].text for o in outputs]
 
 
 problems = [generate_cipher(s, DIFFICULTY) for s in range(PER_CATEGORY)]
 problems += [generate_bit(s, DIFFICULTY) for s in range(PER_CATEGORY)]
 
-results = score(problems, predict)
-report = aggregate(results)
+# Score in batches so we keep vLLM's throughput but still see accuracy climb.
+# Each batch is one batched llm.generate() call; bump BATCH_SIZE for fewer,
+# bigger (faster) batches or lower it for more frequent updates.
+results = []
+seen = hit = 0
+cat_seen = defaultdict(int)
+cat_hit = defaultdict(int)
+n_total = len(problems)
+n_batches = (n_total + BATCH_SIZE - 1) // BATCH_SIZE
+for bi in range(0, n_total, BATCH_SIZE):
+    batch = problems[bi : bi + BATCH_SIZE]
+    raw_texts = predict([build_eval_prompt(p) for p in batch])
+    for p, raw in zip(batch, raw_texts):
+        pred = extract_final_answer(raw)
+        ok = verify(p.answer, pred)
+        results.append(
+            {
+                "id": p.id,
+                "category": p.category,
+                "difficulty": p.n_examples,
+                "answer": p.answer,
+                "predicted": pred,
+                "correct": ok,
+                "correct_strict": verify_strict(p.answer, pred),
+                "raw": raw,
+            }
+        )
+        seen += 1
+        hit += int(ok)
+        cat_seen[p.category] += 1
+        cat_hit[p.category] += int(ok)
+    per_cat = "  ".join(
+        f"{c} {cat_hit[c] / cat_seen[c] * 100:.0f}% ({cat_hit[c]}/{cat_seen[c]})"
+        for c in sorted(cat_seen)
+    )
+    print(
+        f"[batch {bi // BATCH_SIZE + 1:>2}/{n_batches}] {seen:>4}/{n_total} done  "
+        f"running {hit / seen * 100:5.1f}% ({hit}/{seen})  |  {per_cat}",
+        flush=True,
+    )
 
-print("=" * 64)
+report = aggregate(results)
+print("\n" + "=" * 64)
 print("NEW-RULE generalization (synthetic, rules never trained on)")
 print("=" * 64)
 print(format_table(report))
