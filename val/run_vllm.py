@@ -72,15 +72,26 @@ def make_vllm_predictor(
     return predict
 
 
+# Measured real example counts (problems.jsonl): bit gives 7-10 (avg 8.6), every
+# other category gives 3-5 (avg ~4). Matching these per category keeps the eval
+# in-distribution -- a flat difficulty under-determines bit and over-feeds cipher.
+_REAL_DIFFICULTY = {"bit_manipulation": 8}
+
+
 def build_synthetic_valset(
     per_category: int, difficulty: int, registry: HoldoutRegistry
 ) -> list[Problem]:
     """Generate fresh new-rule problems from every registered generator and
-    reserve each rule's signature so it can never enter training generation."""
+    reserve each rule's signature so it can never enter training generation.
+
+    *difficulty* is the default example count; categories in `_REAL_DIFFICULTY`
+    override it to match their measured real example count.
+    """
     problems = []
     for category, spec in sorted(GENERATORS.items()):
+        cat_difficulty = _REAL_DIFFICULTY.get(category, difficulty)
         for seed in range(per_category):
-            problems.append(spec.generate(seed, difficulty))
+            problems.append(spec.generate(seed, cat_difficulty))
             registry.reserve(category, spec.rule_signature(seed))
     return problems
 
@@ -114,7 +125,7 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--adapter", required=True)
     parser.add_argument("--per-category", type=int, default=50)
-    parser.add_argument("--difficulty", type=int, default=6)
+    parser.add_argument("--difficulty", type=int, default=4)  # real non-bit avg ~4
     parser.add_argument("--holdout", default="val/holdout_rules.json")
     parser.add_argument("--out-prefix", default="val_report")
     parser.add_argument(

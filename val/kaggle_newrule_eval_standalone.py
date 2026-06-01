@@ -23,7 +23,11 @@ ADAPTER_PATH = (
     "/kaggle/working"  # dir with adapter_config.json + adapter_model.safetensors
 )
 PER_CATEGORY = 50  # how many distinct new rules per generator
-DIFFICULTY = 6  # in-context examples shown per problem
+# Match the MEASURED real example counts per category (problems.jsonl): bit
+# problems give 7-10 examples (avg 8.6), cipher gives 3-5 (avg 4.0). Running both
+# at a flat 6 under-determined bit (pessimistic) and over-fed cipher.
+CIPHER_DIFFICULTY = 4  # real cipher: 3-5 examples
+BIT_DIFFICULTY = 8  # real bit: 7-10 examples
 BATCH_SIZE = 64  # problems per batched llm.generate() call; = vLLM max_num_seqs, so
 # the scheduler stays full (throughput ~= one big call); accuracy prints per batch
 OUT_JSON = "/kaggle/working/newrule_report.json"
@@ -103,42 +107,89 @@ class Problem:
 
 
 # --- cipher: a brand-new substitution alphabet per seed ----------------------
+# EXACT 77-word Wonderland vocabulary from reasoners/wonderland.txt (inlined here
+# since this cell is self-contained). The real cipher task is ~100% solvable only
+# because ~47% of queries need vocab recognition to fill unseen-letter positions;
+# any out-of-vocab word makes those queries unsolvable (the earlier 35-word list
+# had 5 OOD words -> a misleading ~78%).
 _CIPHER_WORDS = [
-    "queen",
-    "dragon",
-    "castle",
-    "secret",
-    "near",
-    "valley",
-    "discovers",
-    "dreams",
-    "inside",
-    "student",
-    "creates",
-    "magical",
-    "door",
-    "golden",
-    "follows",
-    "princess",
-    "reads",
-    "mysterious",
-    "cat",
-    "imagines",
-    "book",
-    "wizard",
-    "the",
-    "guards",
-    "hidden",
-    "garden",
-    "river",
-    "mountain",
-    "whispers",
+    "above",
+    "alice",
     "ancient",
-    "key",
-    "opens",
-    "silver",
-    "gate",
+    "around",
+    "beyond",
+    "bird",
+    "book",
+    "bright",
+    "castle",
+    "cat",
+    "cave",
+    "chases",
+    "clever",
+    "colorful",
+    "creates",
+    "crystal",
+    "curious",
+    "dark",
+    "discovers",
+    "door",
+    "dragon",
+    "draws",
+    "dreams",
+    "explores",
+    "follows",
     "forest",
+    "found",
+    "garden",
+    "golden",
+    "hatter",
+    "hidden",
+    "imagines",
+    "in",
+    "inside",
+    "island",
+    "key",
+    "king",
+    "knight",
+    "library",
+    "magical",
+    "map",
+    "message",
+    "mirror",
+    "mountain",
+    "mouse",
+    "mysterious",
+    "near",
+    "ocean",
+    "palace",
+    "potion",
+    "princess",
+    "puzzle",
+    "queen",
+    "rabbit",
+    "reads",
+    "school",
+    "secret",
+    "sees",
+    "silver",
+    "story",
+    "strange",
+    "student",
+    "studies",
+    "teacher",
+    "the",
+    "through",
+    "tower",
+    "treasure",
+    "turtle",
+    "under",
+    "valley",
+    "village",
+    "watches",
+    "wise",
+    "wizard",
+    "wonderland",
+    "writes",
 ]
 _CIPHER_HEADER = "In Alice's Wonderland, secret encryption rules are used on text."
 
@@ -420,8 +471,8 @@ def predict(eval_prompts):
     return [o.outputs[0].text for o in outputs]
 
 
-problems = [generate_cipher(s, DIFFICULTY) for s in range(PER_CATEGORY)]
-problems += [generate_bit(s, DIFFICULTY) for s in range(PER_CATEGORY)]
+problems = [generate_cipher(s, CIPHER_DIFFICULTY) for s in range(PER_CATEGORY)]
+problems += [generate_bit(s, BIT_DIFFICULTY) for s in range(PER_CATEGORY)]
 
 # Score in batches so we keep vLLM's throughput but still see accuracy climb.
 # Each batch is one batched llm.generate() call; bump BATCH_SIZE for fewer,

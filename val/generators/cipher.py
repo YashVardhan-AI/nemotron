@@ -2,47 +2,17 @@
 
 import random
 
+from reasoners.cipher import _load_wonderland
 from reasoners.store_types import Example, Problem
 from val.generators import register
 
-# Themed vocabulary mirroring the real cipher problems' Wonderland distribution.
-_WORDS = [
-    "queen",
-    "dragon",
-    "castle",
-    "secret",
-    "near",
-    "valley",
-    "discovers",
-    "dreams",
-    "inside",
-    "student",
-    "creates",
-    "magical",
-    "door",
-    "golden",
-    "follows",
-    "princess",
-    "reads",
-    "mysterious",
-    "cat",
-    "imagines",
-    "book",
-    "wizard",
-    "the",
-    "guards",
-    "hidden",
-    "garden",
-    "river",
-    "mountain",
-    "whispers",
-    "ancient",
-    "key",
-    "opens",
-    "silver",
-    "gate",
-    "forest",
-]
+# Use the EXACT 77-word Wonderland vocabulary the real cipher problems draw from
+# (reasoners/wonderland.txt). The real task is solvable at ~100% because ~47% of
+# queries contain a cipher letter not shown in the 3-5 examples, so they can only
+# be decoded by recognizing the plaintext word against this fixed vocab. An earlier
+# 35-word list with 5 out-of-vocab words (gate/guards/opens/river/whispers) made
+# those queries unsolvable -> a misleadingly hard ~78% (an OOD artifact).
+_WORDS = _load_wonderland()
 
 _PROMPT_HEADER = "In Alice's Wonderland, secret encryption rules are used on text."
 
