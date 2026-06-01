@@ -24,7 +24,8 @@ ADAPTER_PATH = (
 )
 PER_CATEGORY = 50  # how many distinct new rules per generator
 DIFFICULTY = 6  # in-context examples shown per problem
-BATCH_SIZE = 20  # problems per batched llm.generate() call; accuracy prints after each
+BATCH_SIZE = 64  # problems per batched llm.generate() call; = vLLM max_num_seqs, so
+# the scheduler stays full (throughput ~= one big call); accuracy prints per batch
 OUT_JSON = "/kaggle/working/newrule_report.json"
 
 
