@@ -117,3 +117,64 @@ def test_render_prompt_paraphrases_preserve_demos_and_query_structure():
         for i, o in examples:
             assert f"{i} = {o}" in prompt  # demo structure untouched
         assert prompt.rstrip().endswith(q_input)
+
+
+# --- Phase 2: val generator -------------------------------------------------
+
+from reasoners.store_types import Problem  # noqa: E402
+from val.generators.cryptarithm import generate, rule_signature  # noqa: E402
+
+
+def _check_problem_is_self_consistent(p: Problem):
+    seed = int(p.id.rsplit("-", 1)[1])
+    rule = build_rule(seed)
+    for ex in p.examples:  # every demo reproduces under the rule
+        iv = ex.input_value
+        left = (rule.sym_to_digit[iv[0]], rule.sym_to_digit[iv[1]])
+        right = (rule.sym_to_digit[iv[3]], rule.sym_to_digit[iv[4]])
+        _, out = rule.encode_example(iv[2], left, right)
+        assert out == ex.output_value
+    q = p.question  # the query answer reproduces under the rule
+    left = (rule.sym_to_digit[q[0]], rule.sym_to_digit[q[1]])
+    right = (rule.sym_to_digit[q[3]], rule.sym_to_digit[q[4]])
+    _, ans = rule.encode_example(q[2], left, right)
+    assert ans == p.answer
+
+
+def test_generate_shape_and_metadata():
+    p = generate(0, 4)
+    assert p.category == "cryptarithm_deduce"
+    assert p.id == "val-cryptarithm-0"
+    assert len(p.examples) == 4
+    assert len(p.question) == 5
+    rule = build_rule(0)
+    assert p.question[2] in rule.operators  # operator glyph (may be a tail glyph)
+    assert p.prompt.startswith(
+        "In Alice's Wonderland, a secret set of transformation rules"
+    )
+    assert "Now, determine the result for:" in p.prompt
+
+
+def test_generate_is_self_consistent_and_well_determined():
+    for seed in range(25):
+        p = generate(seed, 4)
+        _check_problem_is_self_consistent(p)
+        assert any(ex.input_value[2] == p.question[2] for ex in p.examples)
+        demo_glyphs = set()
+        for ex in p.examples:
+            iv = ex.input_value
+            demo_glyphs |= {iv[0], iv[1], iv[3], iv[4]} | set(ex.output_value)
+        needed = {p.question[0], p.question[1], p.question[3], p.question[4]} | set(
+            p.answer
+        )
+        assert needed <= demo_glyphs
+
+
+def test_rule_signature_is_stable_and_distinct():
+    assert rule_signature(5) == rule_signature(5)
+    assert rule_signature(5) != rule_signature(6)
+
+
+def test_generate_difficulty_controls_demo_count():
+    assert len(generate(1, 3).examples) == 3
+    assert len(generate(1, 5).examples) == 5
