@@ -7,6 +7,7 @@ from reasoners.cryptarithm_deduce_core import solve_problem
 from reasoners.cryptarithm_trace import (
     make_trace_problem,
     reasoning_cryptarithm_arith,
+    reasoning_cryptarithm_propagate,
 )
 
 
@@ -98,3 +99,36 @@ def test_trace_within_token_budget():
         problem, answer = make_trace_problem(seed, 5)
         trace = reasoning_cryptarithm_arith(problem, answer)
         assert len(trace) < 12000, (seed, len(trace))
+
+
+# --- Phase 4.3: compute-and-correct renderer --------------------------------
+
+
+def test_propagate_ends_with_correct_boxed_answer_and_is_sound():
+    for seed in range(22):
+        problem, answer = make_trace_problem(seed, 5)
+        trace = reasoning_cryptarithm_propagate(problem, answer)
+        assert trace is not None, seed
+        assert trace.rstrip().endswith("\\boxed{" + answer + "}"), seed
+        assert "MISMATCH" not in trace
+        assert len(trace) < 12000
+
+
+def test_propagate_agrees_with_deduction_renderer():
+    # both styles must reach the same boxed answer for the same problem.
+    for seed in range(22):
+        problem, answer = make_trace_problem(seed, 4)
+        a = reasoning_cryptarithm_arith(problem, answer)
+        b = reasoning_cryptarithm_propagate(problem, answer)
+        assert a.rstrip().endswith("\\boxed{" + answer + "}")
+        assert b.rstrip().endswith("\\boxed{" + answer + "}")
+
+
+def test_propagate_shows_a_correction():
+    saw_correction = False
+    for seed in range(22):
+        problem, answer = make_trace_problem(seed, 5)
+        low = reasoning_cryptarithm_propagate(problem, answer).lower()
+        if "wrong" in low and "correct" in low:
+            saw_correction = True
+    assert saw_correction  # the compute-and-correct step fires on arith queries

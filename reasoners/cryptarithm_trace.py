@@ -197,3 +197,75 @@ def reasoning_cryptarithm_arith(problem: Problem, answer: str) -> str | None:
     lines.append("")
     lines.append(f"So the answer is \\boxed{{{answer}}}")
     return "\n".join(lines)
+
+
+def reasoning_cryptarithm_propagate(problem: Problem, answer: str) -> str | None:
+    """Alternative CoT style (Phase 4.3): leaner, single-pass-executable
+    compute-and-correct. States the map inline, shows ONE sound wrong-then-fixed
+    operator guess, then checks every example and applies. Same boxed answer as
+    reasoning_cryptarithm_arith -- the two styles are A/B'd on val (Phase 6)."""
+    ans, (_mapping, _op_info), log = solve_problem(_data(problem), trace=True)
+    if ans != answer:
+        return None
+
+    maprec = next((r for r in log if r["kind"] == "map"), None)
+    verifies = [r for r in log if r["kind"] == "verify"]
+    qrec = next(r for r in log if r["kind"] == "query")
+    q = problem.question
+    qop = q[2]
+    qname = qrec["name"]
+
+    lines = [
+        "I'll work out the secret rule by computing the examples and fixing "
+        "whatever does not check out.",
+        "Each input `s0 s1 op s3 s4` is two two-digit numbers joined by an "
+        "operator glyph; the output spells the result in the same secret alphabet.",
+    ]
+
+    if maprec is not None and "left" in qrec:
+        d2s = maprec["digit_to_sym"]
+        v = next(
+            (x for x in verifies if x["inp"][2] == qop and not x.get("structural")),
+            None,
+        )
+        if v is not None:
+            out_len = len(v["out"])
+            feasible = [n for n in _ARITH if out_len <= _MAX_LEN[n]]
+            alt = next((n for n in feasible if n != qname), None)
+            if alt is not None:
+                enc_alt = "".join(
+                    d2s.get(d, "?") for d in _result_digits(alt, v["left"], v["right"])
+                )
+                lines.append(
+                    f"Operator '{qop}': first try the {_OP_WORD[alt]} on {v['inp']}: "
+                    f"{_expr(alt, v['left'], v['right'])} = "
+                    f"{_OP_FN[alt](v['left'], v['right'])} -> {enc_alt}, but the "
+                    f"example shows {v['out']} - wrong. The {_OP_WORD[qname]} gives "
+                    f"{_expr(qname, v['left'], v['right'])} = "
+                    f"{_OP_FN[qname](v['left'], v['right'])} -> {v['out']} - correct."
+                )
+            else:
+                lines.append(
+                    f"Operator '{qop}' must be the {_OP_WORD[qname]}: it is the only "
+                    f"operation whose result has {out_len} digits and matches "
+                    f"{v['inp']} = {v['out']}."
+                )
+        lines.append(
+            "Reading the matching glyphs, the map is: "
+            + ", ".join(f"{d2s[d]}={d}" for d in range(10) if d in d2s)
+            + "."
+        )
+        lines.append("Checking every example:")
+        lines += ["  " + _verify_line(vv) for vv in verifies]
+    else:
+        order = "in order" if qname == "concat" else "reversed"
+        lines.append(
+            f"Operator '{qop}': I first expect arithmetic, but in every example the "
+            f"output is just the input glyphs {order} - so it is the "
+            f"{_OP_WORD[qname]}, no digit values needed."
+        )
+        lines += ["  " + _verify_line(vv) for vv in verifies]
+
+    lines.append("Apply: " + _apply_line(qrec))
+    lines.append(f"\\boxed{{{answer}}}")
+    return "\n".join(lines)
