@@ -68,7 +68,7 @@ DOWNSAMPLE_RATES = {"numeral": 0.4, "gravity": 0.6, "unit_conversion": 0.6}
 
 def load_jsonl(path: Path) -> list[dict]:
     entries = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -257,7 +257,7 @@ def build_cryptarithm_rows(
         if write_segments_to is not None:
             problem_dir = write_segments_to / pid
             problem_dir.mkdir(parents=True, exist_ok=True)
-            with open(problem_dir / "synthetic.jsonl", "w") as f:
+            with open(problem_dir / "synthetic.jsonl", "w", encoding="utf-8") as f:
                 for seg in build_segments(all_tokens, mask):
                     json.dump(seg, f)
                     f.write("\n")
@@ -268,7 +268,11 @@ def build_cryptarithm_rows(
 def _load_cryptarithm_holdout() -> set[str]:
     if not HOLDOUT_RULES.exists():
         return set()
-    return set(json.loads(HOLDOUT_RULES.read_text()).get("cryptarithm_deduce", []))
+    return set(
+        json.loads(HOLDOUT_RULES.read_text(encoding="utf-8")).get(
+            "cryptarithm_deduce", []
+        )
+    )
 
 
 def main() -> None:
@@ -288,7 +292,7 @@ def main() -> None:
     # Load problem prompts from train.csv
     prompts: dict[str, str] = {}
     answers: dict[str, str] = {}
-    with open(TRAIN_CSV, newline="") as f:
+    with open(TRAIN_CSV, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             pid = row["id"]
@@ -328,7 +332,11 @@ def main() -> None:
         if rate is not None and not _keep_by_hash(problem_id, rate):
             continue
 
-        reasoning_text = (REASONING_DIR / f"{problem_id}.txt").read_text().rstrip("\n")
+        reasoning_text = (
+            (REASONING_DIR / f"{problem_id}.txt")
+            .read_text(encoding="utf-8")
+            .rstrip("\n")
+        )
 
         # Extract answer from reasoning's \boxed{} so they match
         boxed_match = re.findall(r"\\boxed\{([^}]*)\}", reasoning_text)
@@ -370,7 +378,7 @@ def main() -> None:
         problem_dir.mkdir(parents=True, exist_ok=True)
         seg_path = problem_dir / "synthetic.jsonl"
 
-        with open(seg_path, "w") as f:
+        with open(seg_path, "w", encoding="utf-8") as f:
             for seg in segments:
                 json.dump(seg, f)
                 f.write("\n")
@@ -396,7 +404,7 @@ def main() -> None:
     # Process augmentations/*.txt (no reasoning, no \boxed{})
     if AUGMENTATIONS_DIR.exists():
         for aug_path in sorted(AUGMENTATIONS_DIR.glob("*.txt")):
-            text = aug_path.read_text()
+            text = aug_path.read_text(encoding="utf-8")
             # Parse [category], [prompt], and [completion] sections
             category = text.split("[category]\n", 1)[1].split("\n[prompt]\n", 1)[0]
             prompt_text = text.split("[prompt]\n", 1)[1].split("\n[completion]\n", 1)[0]
@@ -436,7 +444,7 @@ def main() -> None:
             segments = build_segments(all_tokens, mask)
             problem_dir = CORPUS_DIR / problem_id
             problem_dir.mkdir(parents=True, exist_ok=True)
-            with open(problem_dir / "synthetic.jsonl", "w") as sf:
+            with open(problem_dir / "synthetic.jsonl", "w", encoding="utf-8") as sf:
                 for seg in segments:
                     json.dump(seg, sf)
                     sf.write("\n")
@@ -446,7 +454,7 @@ def main() -> None:
     entries.sort(key=lambda e: e.problem_id)
 
     # Write index JSONL
-    with open(CORPUS_INDEX, "w") as f:
+    with open(CORPUS_INDEX, "w", encoding="utf-8") as f:
         for e in entries:
             json.dump(e.to_index_dict(), f)
             f.write("\n")
