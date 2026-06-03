@@ -144,6 +144,7 @@ def sample_problem(
     *,
     determinacy: str = "well",
     profile: str | None = None,
+    salt: int = 0,
 ) -> tuple[CryptRule, list[tuple[str, str]], str, str]:
     """Sample one solvable instance for this rule. Single source of truth for
     both the val generator and the training emitter (no drift).
@@ -157,8 +158,12 @@ def sample_problem(
     determinacy: "well" (default) over-specifies the map; "near" packs the needed
     digits with no redundant filler (mild uncertainty -- ~10-15% of training).
     profile: None (real mix) | "easy" | "hard" (curriculum, Phase 6).
+    salt: re-rolls the instance (operands/demos) while keeping the SAME rule (so
+    rule_signature(seed) stays stable for holdout). Used by the solver-in-the-loop
+    sampler (cryptarithm_deduce_core.sample_solvable) to resample until the
+    instance is uniquely deducible.
     """
-    rng = random.Random(seed * 7919 + 1)  # own stream, decoupled from build_rule
+    rng = random.Random(seed * 7919 + 1 + salt * 104729)  # own stream; salt re-rolls
     rule = build_rule(seed)
     ops = rule.operators
 
@@ -204,7 +209,9 @@ def sample_problem(
         chunk = digit_seq[i * 4 : i * 4 + 4]
         left = (chunk[0], chunk[1])
         right = (chunk[2], chunk[3])
-        op = q_op if i == 0 else rng.choice(ops)  # demo 0 witnesses the query op
+        # First two demos witness the query op (one demo can leave it ambiguous
+        # between ops of equal result length; two varied demos pin it).
+        op = q_op if i < 2 else rng.choice(ops)
         triples.append((op, left, right))
     rng.shuffle(triples)  # so the query-operator demo is not always first
 

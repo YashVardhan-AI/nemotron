@@ -13,7 +13,8 @@ Always renders the exact real wrapper (wrapper_index=0) so the eval reflects the
 real prompt format. Generated instances are well-determined by construction.
 """
 
-from reasoners.cryptarithm_rule import build_rule, render_prompt, sample_problem
+from reasoners.cryptarithm_deduce_core import sample_solvable
+from reasoners.cryptarithm_rule import build_rule, render_prompt
 from reasoners.store_types import Example, Problem
 from val.generators import register
 
@@ -26,7 +27,10 @@ def rule_signature(seed: int) -> str:
 
 
 def generate(seed: int, difficulty: int) -> Problem:
-    _rule, raw, q_input, q_answer = sample_problem(seed, difficulty)
+    # sample_solvable filters to UNIQUELY-deducible instances (the solver recovers
+    # exactly the planted answer), so the eval never penalizes the model for
+    # under-determined problems no one could solve.
+    _rule, raw, q_input, q_answer = sample_solvable(seed, difficulty)
     examples = [Example(input_value=i, output_value=o) for i, o in raw]
     prompt = render_prompt(raw, q_input, wrapper_index=0)
     return Problem(
