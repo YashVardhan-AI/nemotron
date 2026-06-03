@@ -293,6 +293,16 @@ def _solve(data):
 # --- decision log (consumed by reasoners/cryptarithm_trace.py) ---------------
 
 
+def _struct_dir(iv: str, ov: str) -> str | None:
+    """Concat direction readable from glyphs alone (no digit values), else None."""
+    rsyms = tuple(ov)
+    if rsyms == (iv[0], iv[1], iv[3], iv[4]):
+        return "concat"
+    if rsyms == (iv[3], iv[4], iv[0], iv[1]):
+        return "rev_concat"
+    return None
+
+
 def _op_result_digits(op_name: str, left: int, right: int) -> tuple[int, ...]:
     idx = _OP_NAMES.index(op_name)
     val = _OPS[idx](left, right)
@@ -310,32 +320,23 @@ def _build_log(data, mapping, op_info, answer):
     question = data["question"]
     log: list[dict] = []
 
-    # 1) operator resolution -- structural for concat/rev_concat, else by length.
+    # 1) operator resolution -- structural for concat/rev_concat (readable off the
+    # demos with no digit values), else arithmetic (narrowed by output length).
     by_op: dict[str, list[dict]] = {}
     for e in examples:
         by_op.setdefault(e["input_value"][2], []).append(e)
     for op_glyph, demos in by_op.items():
-        name = op_info.get(op_glyph)
-        ex_tuples = [
-            (
-                d["input_value"][0],
-                d["input_value"][1],
-                d["input_value"][2],
-                d["input_value"][3],
-                d["input_value"][4],
-                tuple(d["output_value"]),
-            )
-            for d in demos
-        ]
-        structural = name in ("concat", "rev_concat") and all(
-            _is_concat(t) for t in ex_tuples
-        )
+        dirs = {_struct_dir(d["input_value"], d["output_value"]) for d in demos}
+        if None not in dirs and len(dirs) == 1:  # all demos same concat direction
+            name, how = dirs.pop(), "structural"
+        else:
+            name, how = op_info.get(op_glyph), "length"
         log.append(
             {
                 "kind": "op",
                 "op": op_glyph,
                 "name": name,
-                "how": "structural" if structural else "length",
+                "how": how,
                 "out_len": len(demos[0]["output_value"]),
             }
         )
@@ -347,16 +348,29 @@ def _build_log(data, mapping, op_info, answer):
             {"kind": "map", "sym_to_digit": dict(mapping), "digit_to_sym": digit_to_sym}
         )
 
-    # 3) verify each demo numerically (only when its operands are mapped).
+    # 3) verify every demo: concat structurally (no map), arithmetic numerically.
+    d2s = {d: s for s, d in mapping.items()}
     for e in examples:
         iv, ov = e["input_value"], e["output_value"]
+        direction = _struct_dir(iv, ov)
+        if direction is not None:
+            log.append(
+                {
+                    "kind": "verify",
+                    "inp": iv,
+                    "out": ov,
+                    "name": direction,
+                    "structural": True,
+                    "ok": True,
+                }
+            )
+            continue
         name = op_info.get(iv[2])
         if name is None or not all(iv[i] in mapping for i in (0, 1, 3, 4)):
             continue
         left = 10 * mapping[iv[0]] + mapping[iv[1]]
         right = 10 * mapping[iv[3]] + mapping[iv[4]]
         digits = _op_result_digits(name, left, right)
-        d2s = {d: s for s, d in mapping.items()}
         check = "".join(d2s.get(d, "?") for d in digits)
         log.append(
             {
@@ -369,6 +383,7 @@ def _build_log(data, mapping, op_info, answer):
                 "digits": digits,
                 "check": check,
                 "ok": check == ov,
+                "structural": False,
             }
         )
 
