@@ -28,6 +28,7 @@ PER_CATEGORY = 50  # how many distinct new rules per generator
 # at a flat 6 under-determined bit (pessimistic) and over-fed cipher.
 CIPHER_DIFFICULTY = 4  # real cipher: 3-5 examples
 BIT_DIFFICULTY = 8  # real bit: 7-10 examples
+CRYPTARITHM_DIFFICULTY = 4  # real cryptarithm_deduce: 3-5 examples (mean ~4.1)
 BATCH_SIZE = 64  # problems per batched llm.generate() call; = vLLM max_num_seqs, so
 # the scheduler stays full (throughput ~= one big call); accuracy prints per batch
 OUT_JSON = "/kaggle/working/newrule_report.json"
@@ -353,6 +354,176 @@ def generate_bit(seed, difficulty):
     )
 
 
+# --- cryptarithm_deduce: arithmetic-cipher family (the #1 lever) -------------
+# Rule logic mirrors reasoners/cryptarithm_rule.py EXACTLY so local and Kaggle
+# numbers agree (same seeds -> same problems). A rule = injective glyph<->digit
+# map x per-operator-glyph op (add/abs_diff/mul/concat/rev_concat) x re-encoding.
+# 5-char inputs `s0 s1 op s3 s4`; operands are two-digit numbers; concat/rev_concat
+# pad to 4 digits, arithmetic ops are natural length. Operators are mostly +,-,*
+# with a calibrated long tail (may also encode a digit; the role is positional).
+# This category is ~0% solved by the deterministic solver, so it is the clean
+# new-rule signal on the #1 lever.
+_CRYPT_SYMBOLS = list("!\"#$%&'()/:<>?@[]^`{|}\\")
+_CRYPT_BASE_OPERATORS = ("+", "-", "*")
+_CRYPT_TAIL_OPERATOR_PROB = 0.15
+_CRYPT_OP_NAMES = ("add", "abs_diff", "mul", "concat", "rev_concat")
+_CRYPT_OPS = {
+    "add": lambda a, b: a + b,
+    "abs_diff": lambda a, b: abs(a - b),
+    "mul": lambda a, b: a * b,
+    "concat": lambda a, b: a * 100 + b,
+    "rev_concat": lambda a, b: b * 100 + a,
+}
+_CRYPT_OP_WEIGHTS = {"add": 3, "abs_diff": 3, "mul": 3, "concat": 2, "rev_concat": 1}
+_CRYPT_WRAPPERS = [
+    (
+        "In Alice's Wonderland, a secret set of transformation rules is applied "
+        "to equations. Below are a few examples:",
+        "Now, determine the result for: ",
+    ),
+    (
+        "In Wonderland, a hidden set of transformation rules is applied to each "
+        "equation. Study these examples:",
+        "Using the same rules, determine the result for: ",
+    ),
+    (
+        "A secret set of rules transforms equations in Wonderland. Here are some "
+        "examples:",
+        "Now find the result for: ",
+    ),
+]
+
+
+def _crypt_num_to_digits(n):
+    if n == 0:
+        return (0,)
+    d = []
+    while n > 0:
+        d.append(n % 10)
+        n //= 10
+    return tuple(reversed(d))
+
+
+@dataclass
+class _CryptRule:
+    digit_to_sym: dict
+    sym_to_digit: dict
+    op_of: dict
+
+    @property
+    def operators(self):
+        return tuple(self.op_of)
+
+    def result_digits(self, op, left, right):
+        name = self.op_of[op]
+        val = _CRYPT_OPS[name](left, right)
+        if name in ("concat", "rev_concat"):
+            return (val // 1000, (val // 100) % 10, (val // 10) % 10, val % 10)
+        return _crypt_num_to_digits(val)
+
+    def encode_output(self, digits):
+        return "".join(self.digit_to_sym[d] for d in digits)
+
+    def encode_example(self, op, left, right):
+        lnum, rnum = 10 * left[0] + left[1], 10 * right[0] + right[1]
+        inp = (
+            self.digit_to_sym[left[0]]
+            + self.digit_to_sym[left[1]]
+            + op
+            + self.digit_to_sym[right[0]]
+            + self.digit_to_sym[right[1]]
+        )
+        return inp, self.encode_output(self.result_digits(op, lnum, rnum))
+
+
+def _crypt_build_rule(seed):
+    rng = random.Random(seed)
+    glyphs = rng.sample(_CRYPT_SYMBOLS, 10)
+    digit_to_sym = {d: glyphs[d] for d in range(10)}
+    sym_to_digit = {s: d for d, s in digit_to_sym.items()}
+    operators = list(_CRYPT_BASE_OPERATORS)
+    if rng.random() < _CRYPT_TAIL_OPERATOR_PROB:
+        operators.append(rng.choice(_CRYPT_SYMBOLS))
+    names = list(_CRYPT_OP_WEIGHTS)
+    weights = [_CRYPT_OP_WEIGHTS[n] for n in names]
+    op_of = {op: rng.choices(names, weights=weights)[0] for op in operators}
+    return _CryptRule(digit_to_sym, sym_to_digit, op_of)
+
+
+_CRYPT_PROFILE_OPS = {
+    "easy": ("add", "concat", "rev_concat"),
+    "hard": ("mul", "abs_diff"),
+}
+_CRYPT_PROFILE_RANGE = {"easy": (0, 5), "hard": (0, 9)}
+
+
+def _crypt_sample_problem(seed, difficulty=4, determinacy="well", profile=None):
+    rng = random.Random(seed * 7919 + 1)
+    rule = _crypt_build_rule(seed)
+    ops = rule.operators
+    lo_d, hi_d = _CRYPT_PROFILE_RANGE.get(profile or "", (0, 9))
+
+    def digit():
+        return rng.randint(lo_d, hi_d)
+
+    if profile in _CRYPT_PROFILE_OPS:
+        pref = [
+            op for op in ops if rule.op_of[op] in _CRYPT_PROFILE_OPS[profile]
+        ] or list(ops)
+    else:
+        pref = list(ops)
+    q_op = rng.choice(pref)
+    q_left = (digit(), digit())
+    q_right = (digit(), digit())
+    q_input, q_answer = rule.encode_example(q_op, q_left, q_right)
+
+    needed = sorted(
+        {q_left[0], q_left[1], q_right[0], q_right[1]}
+        | {rule.sym_to_digit[g] for g in q_answer}
+    )
+    total_slots = difficulty * 4
+    if len(needed) > total_slots:
+        needed = needed[:total_slots]
+    digit_seq = list(needed)
+    if determinacy != "near":
+        while len(digit_seq) < total_slots:
+            digit_seq.append(digit())
+    else:
+        while len(digit_seq) < total_slots:
+            digit_seq.append(rng.choice(needed) if needed else digit())
+    rng.shuffle(digit_seq)
+
+    triples = []
+    for i in range(difficulty):
+        chunk = digit_seq[i * 4 : i * 4 + 4]
+        left = (chunk[0], chunk[1])
+        right = (chunk[2], chunk[3])
+        op = q_op if i == 0 else rng.choice(ops)
+        triples.append((op, left, right))
+    rng.shuffle(triples)
+    examples = [rule.encode_example(op, lo, ro) for op, lo, ro in triples]
+    return rule, examples, q_input, q_answer
+
+
+def _crypt_render_prompt(examples, q_input, wrapper_index=0):
+    header, lead = _CRYPT_WRAPPERS[wrapper_index % len(_CRYPT_WRAPPERS)]
+    lines = "\n".join(f"{i} = {o}" for i, o in examples)
+    return f"{header}\n{lines}\n{lead}{q_input}"
+
+
+def generate_cryptarithm(seed, difficulty):
+    _rule, raw, q_input, q_answer = _crypt_sample_problem(seed, difficulty)
+    prompt = _crypt_render_prompt(raw, q_input, 0)
+    return Problem(
+        id=f"val-cryptarithm-{seed}",
+        category="cryptarithm_deduce",
+        prompt=prompt,
+        answer=q_answer,
+        n_examples=difficulty,
+        meta="arith",
+    )
+
+
 # %% ── Cell 4: scoring + reporting ───────────────────────────────────────────
 from collections import defaultdict
 
@@ -473,6 +644,9 @@ def predict(eval_prompts):
 
 problems = [generate_cipher(s, CIPHER_DIFFICULTY) for s in range(PER_CATEGORY)]
 problems += [generate_bit(s, BIT_DIFFICULTY) for s in range(PER_CATEGORY)]
+problems += [
+    generate_cryptarithm(s, CRYPTARITHM_DIFFICULTY) for s in range(PER_CATEGORY)
+]
 
 # Score in batches so we keep vLLM's throughput but still see accuracy climb.
 # Each batch is one batched llm.generate() call; bump BATCH_SIZE for fewer,
