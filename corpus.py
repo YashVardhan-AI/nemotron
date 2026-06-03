@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -64,6 +65,13 @@ CRYPT_REPLACE_REAL = True
 # instead -- the winning recipe's documented rates. Deterministic by problem_id
 # hash (stable across runs). Set DOWNSAMPLE_RATES = {} to keep every example.
 DOWNSAMPLE_RATES = {"numeral": 0.4, "gravity": 0.6, "unit_conversion": 0.6}
+
+# Build speed: augmentation categories are NOT reasoning categories, so the
+# reasoning-only train filter discards them -- tokenizing ~8.5k of them just to
+# throw them away ~doubles the build time. Set BUILD_AUGMENTATIONS=0 (env) or
+# False to skip them for fast reasoning-only rebuilds across Phase 6 arms.
+# Default True preserves the full-corpus behavior.
+BUILD_AUGMENTATIONS = os.environ.get("BUILD_AUGMENTATIONS", "1") != "0"
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -401,8 +409,10 @@ def main() -> None:
             f"(style={CRYPT_STYLE})"
         )
 
-    # Process augmentations/*.txt (no reasoning, no \boxed{})
-    if AUGMENTATIONS_DIR.exists():
+    # Process augmentations/*.txt (no reasoning, no \boxed{}).
+    if not BUILD_AUGMENTATIONS:
+        print("Skipping augmentations (BUILD_AUGMENTATIONS=0)")
+    if BUILD_AUGMENTATIONS and AUGMENTATIONS_DIR.exists():
         for aug_path in sorted(AUGMENTATIONS_DIR.glob("*.txt")):
             text = aug_path.read_text(encoding="utf-8")
             # Parse [category], [prompt], and [completion] sections
