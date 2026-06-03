@@ -51,6 +51,12 @@ CRYPT_STYLE = "deduce"
 CRYPT_DIFFICULTY = 4
 CRYPT_SEED_OFFSET = 1_000_000  # disjoint from val seeds (0..few-thousand)
 HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
+# The real cryptarithm_deduce reasoning files (reasoning/*.txt) are concat-only:
+# 658/659 default to concatenation and NONE show arithmetic, so for arithmetic
+# problems they pair concat reasoning with an arithmetic answer (an inconsistent
+# signal -- the root cause of the ~6% baseline). When forward-gen is on, REPLACE
+# them with the verified forward-gen traces rather than mixing both.
+CRYPT_REPLACE_REAL = True
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -296,6 +302,11 @@ def main() -> None:
     for problem_id in problem_ids:
         category = problem_cats[problem_id]
         answer = answers[problem_id]
+
+        # Drop the concat-only real cryptarithm_deduce traces; the forward-gen
+        # rows below replace them with verified arithmetic-family reasoning.
+        if CRYPT_N > 0 and CRYPT_REPLACE_REAL and category == "cryptarithm_deduce":
+            continue
 
         reasoning_text = (REASONING_DIR / f"{problem_id}.txt").read_text().rstrip("\n")
 
