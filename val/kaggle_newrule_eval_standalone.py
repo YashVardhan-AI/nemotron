@@ -512,7 +512,7 @@ def _crypt_render_prompt(examples, q_input, wrapper_index=0):
 
 
 def generate_cryptarithm(seed, difficulty):
-    _rule, raw, q_input, q_answer = _crypt_sample_problem(seed, difficulty)
+    rule, raw, q_input, q_answer = _crypt_sample_problem(seed, difficulty)
     prompt = _crypt_render_prompt(raw, q_input, 0)
     return Problem(
         id=f"val-cryptarithm-{seed}",
@@ -520,7 +520,10 @@ def generate_cryptarithm(seed, difficulty):
         prompt=prompt,
         answer=q_answer,
         n_examples=difficulty,
-        meta="arith",
+        # query op family (concat/rev_concat vs add/abs_diff/mul): the current
+        # adapter only saw concat traces, so this isolates the easy concat slice
+        # from the arithmetic headroom the deduction CoT targets.
+        meta=rule.op_of[q_input[2]],
     )
 
 
@@ -717,6 +720,29 @@ if fam_seen:
         print(
             f"  {fam:<10} {n:>4} {fam_hit[fam] / n * 100:>7.1f} "
             f"{fam_hit_strict[fam] / n * 100:>11.1f}"
+        )
+
+# Per-query-op breakdown for cryptarithm_deduce. The current adapter trained on
+# concat-only traces, so the baseline score should be concentrated in
+# concat/rev_concat; add/abs_diff/mul (the arithmetic family) is the headroom the
+# deduction CoT (Phase 4-5) targets. After retraining, watch arith climb from ~0.
+cr_seen = defaultdict(int)
+cr_hit = defaultdict(int)
+cr_hit_strict = defaultdict(int)
+for r in results:
+    if r["category"] != "cryptarithm_deduce":
+        continue
+    cr_seen[r["meta"]] += 1
+    cr_hit[r["meta"]] += int(r["correct"])
+    cr_hit_strict[r["meta"]] += int(r["correct_strict"])
+if cr_seen:
+    print("\ncryptarithm_deduce by query op:")
+    print(f"  {'op':<12} {'N':>4} {'Acc%':>7} {'StrictAcc%':>11}")
+    for op in sorted(cr_seen):
+        n = cr_seen[op]
+        print(
+            f"  {op:<12} {n:>4} {cr_hit[op] / n * 100:>7.1f} "
+            f"{cr_hit_strict[op] / n * 100:>11.1f}"
         )
 
 with open(OUT_JSON, "w") as f:
