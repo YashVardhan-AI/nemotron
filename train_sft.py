@@ -100,7 +100,7 @@ class Cfg:
     model_name: str = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
     batch_size: int = 64
     num_epochs: int = 1
-    lora_rank: int = 32 # 32
+    lora_rank: int = 32  # 32
     max_length: int = 8192
     train_mlp: bool = True
     train_attn: bool = True
@@ -256,18 +256,31 @@ def compute_epoch_metrics(
     return metrics_grouped[:2] + general_metrics + metrics_grouped[2:]
 
 
+_REASONING_CATEGORIES = frozenset(
+    {
+        "bit_manipulation",
+        "cipher",
+        "cryptarithm_deduce",
+        "cryptarithm_guess",
+        "equation_numeric_deduce",
+        "equation_numeric_guess",
+        "gravity",
+        "numeral",
+        "unit_conversion",
+    }
+)
+
+
 def filter_training_examples(examples: list[TrainingExample]) -> list[TrainingExample]:
-    # return [
-    #     e
-    #     for e in examples
-    #     if e.category in ("numeral", "cryptarithm_deduce", "cryptarithm_guess")
-    # ]
-    return [
-        e
-        for e in examples
-        if e.category in ("spelling")
-    ]
-    # return examples
+    """Select which categories to train on.
+
+    Default = the 9 reasoning categories (the winning recipe: reasoning-only, no
+    augmentation categories like 'spelling'). cryptarithm_deduce here includes the
+    Phase-5 forward-gen rows added by corpus.py. For a single-category ablation,
+    narrow this -- e.g. `return [e for e in examples if e.category ==
+    "cryptarithm_deduce"]` to isolate the cryptarithm lever.
+    """
+    return [e for e in examples if e.category in _REASONING_CATEGORIES]
 
 
 async def main():
@@ -325,7 +338,9 @@ async def main():
 
     # Append to logpaths index for GitHub Pages
     logpaths_file = sft_dir / "logpaths.txt"
-    existing = set(logpaths_file.read_text().splitlines()) if logpaths_file.exists() else set()
+    existing = (
+        set(logpaths_file.read_text().splitlines()) if logpaths_file.exists() else set()
+    )
     if cfg.log_path not in existing:
         with open(logpaths_file, "a") as f:
             f.write(cfg.log_path + "\n")
