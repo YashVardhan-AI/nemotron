@@ -457,8 +457,8 @@ _CRYPT_PROFILE_OPS = {
 _CRYPT_PROFILE_RANGE = {"easy": (0, 5), "hard": (0, 9)}
 
 
-def _crypt_sample_problem(seed, difficulty=4, determinacy="well", profile=None):
-    rng = random.Random(seed * 7919 + 1)
+def _crypt_sample_problem(seed, difficulty=4, determinacy="well", profile=None, salt=0):
+    rng = random.Random(seed * 7919 + 1 + salt * 104729)
     rule = _crypt_build_rule(seed)
     ops = rule.operators
     lo_d, hi_d = _CRYPT_PROFILE_RANGE.get(profile or "", (0, 9))
@@ -498,7 +498,7 @@ def _crypt_sample_problem(seed, difficulty=4, determinacy="well", profile=None):
         chunk = digit_seq[i * 4 : i * 4 + 4]
         left = (chunk[0], chunk[1])
         right = (chunk[2], chunk[3])
-        op = q_op if i == 0 else rng.choice(ops)
+        op = q_op if i < 2 else rng.choice(ops)  # first two demos witness query op
         triples.append((op, left, right))
     rng.shuffle(triples)
     examples = [rule.encode_example(op, lo, ro) for op, lo, ro in triples]
@@ -511,8 +511,238 @@ def _crypt_render_prompt(examples, q_input, wrapper_index=0):
     return f"{header}\n{lines}\n{lead}{q_input}"
 
 
+# --- cryptarithm solver (inlined from reasoners/cryptarithm_deduce_core.py) ---
+# Filters generated instances to UNIQUELY-deducible ones, so the eval never
+# penalizes the model for under-determined problems no one could solve. Mirrors
+# the repo solver EXACTLY so local and Kaggle problem sets agree.
+from collections import Counter
+
+_CRYPT_OP_LIST = [
+    _CRYPT_OPS["add"],
+    _CRYPT_OPS["abs_diff"],
+    _CRYPT_OPS["mul"],
+    _CRYPT_OPS["concat"],
+    _CRYPT_OPS["rev_concat"],
+]
+_CRYPT_OP_NAME_LIST = list(_CRYPT_OP_NAMES)
+_CRYPT_NODE_CAP = 2_000_000
+
+
+def _crypt_is_concat(ex):
+    s0, s1, _op, s3, s4, rsyms = ex
+    return rsyms == (s0, s1, s3, s4) or rsyms == (s3, s4, s0, s1)
+
+
+class _CryptSolver:
+    def __init__(self, examples, query, unique=True):
+        self.examples = examples
+        self.query = query
+        self.unique = unique
+        self.mapping = {}
+        self.used = set()
+        self.op_assign = {}
+        self.answers = Counter()
+        self.answer_info = {}
+        self.max_solutions = 200
+        self.nodes = 0
+
+    def solve_counted(self):
+        self._process(0)
+        if self.answers:
+            best, _ = self.answers.most_common(1)[0]
+            return best, self.answer_info.get(best, ({}, {})), len(self.answers)
+        return None, ({}, {}), 0
+
+    def _process(self, idx):
+        if len(self.answers) >= self.max_solutions:
+            return
+        self.nodes += 1
+        if self.nodes > _CRYPT_NODE_CAP:
+            return
+        if idx == len(self.examples):
+            self._compute_query()
+            return
+        s0, s1, op_sym, s3, s4, rsyms = self.examples[idx]
+        rlen = len(rsyms)
+        feasible_ops = []
+        if rlen <= 3:
+            feasible_ops.append(0)
+        if rlen <= 2:
+            feasible_ops.append(1)
+        if rlen <= 4:
+            feasible_ops.append(2)
+        if rlen == 4:
+            feasible_ops.extend([3, 4])
+        for d0 in self._vals(s0):
+            n0 = self._assign(s0, d0)
+            if n0 is None:
+                continue
+            for d1 in self._vals(s1):
+                n1 = self._assign(s1, d1)
+                if n1 is None:
+                    continue
+                lv = d0 * 10 + d1
+                for d3 in self._vals(s3):
+                    n3 = self._assign(s3, d3)
+                    if n3 is None:
+                        continue
+                    for d4 in self._vals(s4):
+                        n4 = self._assign(s4, d4)
+                        if n4 is None:
+                            continue
+                        rv = d3 * 10 + d4
+                        ops_to_try = (
+                            [self.op_assign[op_sym]]
+                            if op_sym in self.op_assign
+                            else feasible_ops
+                        )
+                        for op_id in ops_to_try:
+                            result_val = _CRYPT_OP_LIST[op_id](lv, rv)
+                            if op_id >= 3:
+                                if result_val < 0 or result_val >= 10000:
+                                    continue
+                                rd = (
+                                    result_val // 1000,
+                                    (result_val // 100) % 10,
+                                    (result_val // 10) % 10,
+                                    result_val % 10,
+                                )
+                            else:
+                                rd = _crypt_num_to_digits(result_val)
+                            if len(rd) != rlen:
+                                continue
+                            assigns = []
+                            ok = True
+                            for rs, rdig in zip(rsyms, rd):
+                                ns = self._assign(rs, rdig)
+                                if ns is None:
+                                    ok = False
+                                    break
+                                assigns.append((rs, ns))
+                            if ok:
+                                op_new = op_sym not in self.op_assign
+                                if op_new:
+                                    self.op_assign[op_sym] = op_id
+                                self._process(idx + 1)
+                                if op_new:
+                                    del self.op_assign[op_sym]
+                            for rs, ns in reversed(assigns):
+                                self._undo(rs, ns)
+                            if len(self.answers) >= self.max_solutions:
+                                self._undo(s4, n4)
+                                self._undo(s3, n3)
+                                self._undo(s1, n1)
+                                self._undo(s0, n0)
+                                return
+                        self._undo(s4, n4)
+                    self._undo(s3, n3)
+                self._undo(s1, n1)
+            self._undo(s0, n0)
+
+    def _vals(self, sym):
+        if sym in self.mapping:
+            return (self.mapping[sym],)
+        if self.unique:
+            return tuple(d for d in range(10) if d not in self.used)
+        return range(10)
+
+    def _assign(self, sym, dig):
+        if sym in self.mapping:
+            return False if self.mapping[sym] == dig else None
+        if self.unique and dig in self.used:
+            return None
+        self.mapping[sym] = dig
+        if self.unique:
+            self.used.add(dig)
+        return True
+
+    def _undo(self, sym, was_new):
+        if was_new is True:
+            if self.unique:
+                self.used.discard(self.mapping[sym])
+            del self.mapping[sym]
+
+    def _compute_query(self):
+        qs0, qs1, qop, qs3, qs4 = self.query
+        for s in (qs0, qs1, qs3, qs4):
+            if s not in self.mapping:
+                return
+        ql = self.mapping[qs0] * 10 + self.mapping[qs1]
+        qr = self.mapping[qs3] * 10 + self.mapping[qs4]
+        op_candidates = (
+            [self.op_assign[qop]]
+            if qop in self.op_assign
+            else range(len(_CRYPT_OP_NAME_LIST))
+        )
+        d2s = {}
+        for s, d in self.mapping.items():
+            if d not in d2s:
+                d2s[d] = s
+        for op_id in op_candidates:
+            result_val = _CRYPT_OP_LIST[op_id](ql, qr)
+            if op_id >= 3:
+                if result_val < 0 or result_val >= 10000:
+                    continue
+                rd = (
+                    result_val // 1000,
+                    (result_val // 100) % 10,
+                    (result_val // 10) % 10,
+                    result_val % 10,
+                )
+            else:
+                rd = _crypt_num_to_digits(result_val)
+            parts = []
+            ok = True
+            for d in rd:
+                if d not in d2s:
+                    ok = False
+                    break
+                parts.append(d2s[d])
+            if not ok:
+                continue
+            ans = "".join(parts)
+            self.answers[ans] += 1
+            if ans not in self.answer_info:
+                self.answer_info[ans] = (dict(self.mapping), {})
+
+
+def _crypt_solve_counted(examples_raw, q_input):
+    examples = [(i[0], i[1], i[2], i[3], i[4], tuple(o)) for i, o in examples_raw]
+    query = (q_input[0], q_input[1], q_input[2], q_input[3], q_input[4])
+    concat_ops = {ex[2] for ex in examples if _crypt_is_concat(ex)}
+    nonconcat_ops = {ex[2] for ex in examples if not _crypt_is_concat(ex)}
+    if query[2] in concat_ops and query[2] not in nonconcat_ops:
+        for ex in examples:
+            if ex[2] == query[2] and _crypt_is_concat(ex):
+                s0, s1, _, s3, s4, rsyms = ex
+                if rsyms == (s0, s1, s3, s4):
+                    return query[0] + query[1] + query[3] + query[4], 1
+                return query[3] + query[4] + query[0] + query[1], 1
+        return query[0] + query[1] + query[3] + query[4], 1
+    arith = [ex for ex in examples if not _crypt_is_concat(ex)]
+    ans, _info, n = _CryptSolver(arith, query, unique=True).solve_counted()
+    return ans, n
+
+
+def _crypt_is_uniquely_solvable(examples_raw, q_input, q_answer):
+    ans, n = _crypt_solve_counted(examples_raw, q_input)
+    return ans == q_answer and n == 1
+
+
+def _crypt_sample_solvable(seed, difficulty=4, max_salt=40):
+    last = None
+    for salt in range(max_salt):
+        rule, examples, q_input, q_answer = _crypt_sample_problem(
+            seed, difficulty, salt=salt
+        )
+        last = (rule, examples, q_input, q_answer)
+        if _crypt_is_uniquely_solvable(examples, q_input, q_answer):
+            return rule, examples, q_input, q_answer
+    return last
+
+
 def generate_cryptarithm(seed, difficulty):
-    rule, raw, q_input, q_answer = _crypt_sample_problem(seed, difficulty)
+    rule, raw, q_input, q_answer = _crypt_sample_solvable(seed, difficulty)
     prompt = _crypt_render_prompt(raw, q_input, 0)
     return Problem(
         id=f"val-cryptarithm-{seed}",
