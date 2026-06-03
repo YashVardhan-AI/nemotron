@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import shutil
@@ -57,6 +58,12 @@ HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
 # signal -- the root cause of the ~6% baseline). When forward-gen is on, REPLACE
 # them with the verified forward-gen traces rather than mixing both.
 CRYPT_REPLACE_REAL = True
+
+# Downsample the SATURATED categories (numeral/gravity/unit_conversion generalize
+# at ~100% on unseen rules) so training capacity goes to the hard categories
+# instead -- the winning recipe's documented rates. Deterministic by problem_id
+# hash (stable across runs). Set DOWNSAMPLE_RATES = {} to keep every example.
+DOWNSAMPLE_RATES = {"numeral": 0.4, "gravity": 0.6, "unit_conversion": 0.6}
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -147,6 +154,14 @@ def build_segments(
     )
 
     return segments
+
+
+def _keep_by_hash(problem_id: str, rate: float) -> bool:
+    """Deterministic keep decision for downsampling (stable across runs)."""
+    if rate >= 1.0:
+        return True
+    h = int(hashlib.md5(problem_id.encode()).hexdigest()[:8], 16)
+    return (h % 10_000) / 10_000 < rate
 
 
 def _crypt_renderer(style: str, seed: int):
@@ -306,6 +321,11 @@ def main() -> None:
         # Drop the concat-only real cryptarithm_deduce traces; the forward-gen
         # rows below replace them with verified arithmetic-family reasoning.
         if CRYPT_N > 0 and CRYPT_REPLACE_REAL and category == "cryptarithm_deduce":
+            continue
+
+        # Downsample saturated categories (deterministic, stable across runs).
+        rate = DOWNSAMPLE_RATES.get(category)
+        if rate is not None and not _keep_by_hash(problem_id, rate):
             continue
 
         reasoning_text = (REASONING_DIR / f"{problem_id}.txt").read_text().rstrip("\n")
