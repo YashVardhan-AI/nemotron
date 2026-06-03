@@ -97,6 +97,48 @@ def test_sample_problem_is_deterministic():
     assert (a[1], a[2], a[3]) == (b[1], b[2], b[3])
 
 
+def test_near_determinacy_is_self_consistent_and_exact_count():
+    for seed in range(40):
+        rule, examples, q_input, q_answer = sample_problem(seed, 4, determinacy="near")
+        assert len(examples) == 4
+        needed = {q_input[0], q_input[1], q_input[3], q_input[4]} | set(q_answer)
+        assert needed <= _witnessed_digit_glyphs(examples)
+        left = (rule.sym_to_digit[q_input[0]], rule.sym_to_digit[q_input[1]])
+        right = (rule.sym_to_digit[q_input[3]], rule.sym_to_digit[q_input[4]])
+        _, ans = rule.encode_example(q_input[2], left, right)
+        assert ans == q_answer
+
+
+_EASY_OPS = {"add", "concat", "rev_concat"}
+_HARD_OPS = {"mul", "abs_diff"}
+
+
+def test_easy_profile_biases_query_to_easy_ops_and_small_operands():
+    saw_easy = False
+    for seed in range(120):
+        rule = build_rule(seed)
+        if not any(name in _EASY_OPS for name in rule.op_of.values()):
+            continue  # rule has no easy op -> sampler falls back, skip
+        _, _, q_input, _ = sample_problem(seed, 4, profile="easy")
+        assert rule.op_of[q_input[2]] in _EASY_OPS  # query op is always easy
+        digits = [rule.sym_to_digit[q_input[i]] for i in (0, 1, 3, 4)]
+        assert max(digits) <= 5  # easy operand range
+        saw_easy = True
+    assert saw_easy  # the sweep actually exercised the easy branch
+
+
+def test_hard_profile_biases_query_to_hard_ops():
+    saw_hard = False
+    for seed in range(120):
+        rule = build_rule(seed)
+        if not any(name in _HARD_OPS for name in rule.op_of.values()):
+            continue
+        _, _, q_input, _ = sample_problem(seed, 4, profile="hard")
+        assert rule.op_of[q_input[2]] in _HARD_OPS
+        saw_hard = True
+    assert saw_hard
+
+
 def test_render_prompt_default_is_exact_real_wrapper():
     _, examples, q_input, _ = sample_problem(0, 4)
     prompt = render_prompt(examples, q_input, 0)
