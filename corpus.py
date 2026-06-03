@@ -23,9 +23,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from tokenizers import Tokenizer  # type: ignore[import-untyped]
-from transformers import AutoTokenizer  # type: ignore[import-untyped]
-
 TRAIN_CSV = Path(__file__).parent / "train.csv"
 AUGMENTATIONS_DIR = Path(__file__).parent / "augmentations"
 PROBLEMS_INDEX = Path(__file__).parent / "problems.jsonl"
@@ -42,6 +39,19 @@ PROMPT_SUFFIX = (
 
 TOKEN_LIMIT = 8192
 
+# --- cryptarithm_deduce forward-gen (Phase 5 of the #1-lever plan) ------------
+# Add N distinct VERIFIED cryptarithm_deduce traces (the ~x12 exact-copy dup of
+# ~54 real traces is already gone, removed in f42e3fbcf6 -- so this ADDS rows).
+# Seeds start at a high offset disjoint from the val generator's small seeds, and
+# any val-reserved rule_signature is skipped, so no validation rule can leak into
+# training. Phase 6 sweeps CRYPT_N (size-matched ~600 vs scale 3-8k) and
+# CRYPT_STYLE (deduce | propagate | mixed). Set CRYPT_N = 0 to disable.
+CRYPT_N = 600
+CRYPT_STYLE = "deduce"
+CRYPT_DIFFICULTY = 4
+CRYPT_SEED_OFFSET = 1_000_000  # disjoint from val seeds (0..few-thousand)
+HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
+
 
 def load_jsonl(path: Path) -> list[dict]:
     entries = []
@@ -55,7 +65,7 @@ def load_jsonl(path: Path) -> list[dict]:
 
 def tokenize_prompt(
     prompt_text: str,
-    chat_tokenizer: AutoTokenizer,
+    chat_tokenizer,  # transformers AutoTokenizer (untyped: dep imported lazily)
     *,
     suffix: str = PROMPT_SUFFIX,
 ) -> list[int]:
@@ -133,12 +143,122 @@ def build_segments(
     return segments
 
 
+def _crypt_renderer(style: str, seed: int):
+    from reasoners.cryptarithm_trace import (
+        reasoning_cryptarithm_arith,
+        reasoning_cryptarithm_propagate,
+    )
+
+    if style == "deduce":
+        return reasoning_cryptarithm_arith
+    if style == "propagate":
+        return reasoning_cryptarithm_propagate
+    if style == "mixed":
+        return (
+            reasoning_cryptarithm_arith
+            if seed % 2 == 0
+            else reasoning_cryptarithm_propagate
+        )
+    raise ValueError(f"unknown cryptarithm trace style: {style!r}")
+
+
+def build_cryptarithm_examples(
+    n: int,
+    style: str,
+    holdout: set[str],
+    *,
+    difficulty: int = CRYPT_DIFFICULTY,
+    seed_offset: int = CRYPT_SEED_OFFSET,
+) -> list[tuple[str, str, str, str]]:
+    """Tokenizer-free generator of N distinct verified cryptarithm_deduce rows.
+
+    Returns (problem_id, prompt_text, completion_text, answer) tuples. Each is a
+    UNIQUELY-deducible instance (solver-filtered) with a genuine-deduction CoT.
+    Skips any seed whose rule_signature is in *holdout* (no val leakage); seeds
+    start at *seed_offset*, disjoint from the val generator's small seeds.
+    """
+    from reasoners.cryptarithm_trace import make_trace_problem
+    from val.generators.cryptarithm import rule_signature
+
+    out: list[tuple[str, str, str, str]] = []
+    seed = seed_offset
+    guard = seed_offset + 100 * (n + 1)  # generous; ~no skips expected
+    while len(out) < n and seed < guard:
+        if rule_signature(seed) in holdout:
+            seed += 1
+            continue
+        problem, answer = make_trace_problem(seed, difficulty)
+        reasoning = _crypt_renderer(style, seed)(problem, answer)
+        if reasoning is None:  # solver disagreed (should not happen); skip
+            seed += 1
+            continue
+        completion = f"{reasoning}\n</think>\n\\boxed{{{answer}}}<|im_end|>"
+        out.append((f"cryptarithm-{style}-{seed}", problem.prompt, completion, answer))
+        seed += 1
+    return out
+
+
+def build_cryptarithm_rows(
+    n: int,
+    style: str,
+    holdout: set[str],
+    tokenizer,
+    chat_tokenizer,
+    *,
+    difficulty: int = CRYPT_DIFFICULTY,
+    write_segments_to: Path | None = None,
+) -> list[CorpusEntry]:
+    """Tokenize build_cryptarithm_examples into CorpusEntry rows (prompt masked,
+    completion unmasked), matching the real-problem path. Writes per-entry segment
+    files under *write_segments_to* when given."""
+    rows: list[CorpusEntry] = []
+    for pid, prompt_text, completion_text, answer in build_cryptarithm_examples(
+        n, style, holdout, difficulty=difficulty
+    ):
+        completion_ids = tokenizer.encode(completion_text, add_special_tokens=False).ids
+        prompt_ids = tokenize_prompt(prompt_text, chat_tokenizer)
+        all_tokens = prompt_ids + completion_ids
+        mask = [0] * len(prompt_ids) + [1] * len(completion_ids)
+        if len(all_tokens) > TOKEN_LIMIT:
+            all_tokens = all_tokens[:TOKEN_LIMIT]
+            mask = mask[:TOKEN_LIMIT]
+        unmasked = sum(mask)
+        entry = CorpusEntry(
+            problem_id=pid,
+            category="cryptarithm_deduce",
+            tokens=all_tokens,
+            mask=mask,
+            masked_token_count=len(mask) - unmasked,
+            unmasked_token_count=unmasked,
+            answer=answer,
+            included=True,
+        )
+        if write_segments_to is not None:
+            problem_dir = write_segments_to / pid
+            problem_dir.mkdir(parents=True, exist_ok=True)
+            with open(problem_dir / "synthetic.jsonl", "w") as f:
+                for seg in build_segments(all_tokens, mask):
+                    json.dump(seg, f)
+                    f.write("\n")
+        rows.append(entry)
+    return rows
+
+
+def _load_cryptarithm_holdout() -> set[str]:
+    if not HOLDOUT_RULES.exists():
+        return set()
+    return set(json.loads(HOLDOUT_RULES.read_text()).get("cryptarithm_deduce", []))
+
+
 def main() -> None:
     if not PROBLEMS_INDEX.exists():
         print(f"No {PROBLEMS_INDEX} found. Run problems.py first.")
         return
 
-    # Load tokenizers
+    # Load tokenizers (heavy deps imported lazily so importing corpus stays light)
+    from tokenizers import Tokenizer  # type: ignore[import-untyped]
+    from transformers import AutoTokenizer  # type: ignore[import-untyped]
+
     tokenizer = Tokenizer.from_file(str(TOKENIZER_PATH))
     chat_tokenizer = AutoTokenizer.from_pretrained(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", trust_remote_code=True
@@ -225,6 +345,22 @@ def main() -> None:
                 f.write("\n")
 
         entries.append(entry)
+
+    # Add forward-generated cryptarithm_deduce traces (Phase 5 of the #1 lever).
+    if CRYPT_N > 0:
+        crypt_rows = build_cryptarithm_rows(
+            CRYPT_N,
+            CRYPT_STYLE,
+            _load_cryptarithm_holdout(),
+            tokenizer,
+            chat_tokenizer,
+            write_segments_to=CORPUS_DIR,
+        )
+        entries.extend(crypt_rows)
+        print(
+            f"Added {len(crypt_rows)} cryptarithm_deduce forward-gen rows "
+            f"(style={CRYPT_STYLE})"
+        )
 
     # Process augmentations/*.txt (no reasoning, no \boxed{})
     if AUGMENTATIONS_DIR.exists():
