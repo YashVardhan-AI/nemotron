@@ -27,7 +27,7 @@ def _digits_lsb(n: int) -> list[int]:
 
 def _spaced_msb(digits_lsb: list[int]) -> str:
     """Space-separated digits, most-significant-first (one token each)."""
-    return " ".join(str(d) for d in reversed(digits_lsb)) or "0"
+    return " ".join(str(d) for d in reversed(digits_lsb))
 
 
 def _render_columns(symbol: str, a: int, b: int, da: list[int], db: list[int]) -> str:
@@ -48,7 +48,8 @@ def _render_columns(symbol: str, a: int, b: int, da: list[int], db: list[int]) -
         res.append(d)
     if carry:
         res.append(carry)
-    lines.append(f"    result digits (reversed): {_spaced_msb(res)} = {a + b}")
+    total = int("".join(str(d) for d in reversed(res)))
+    lines.append(f"    result digits (reversed): {_spaced_msb(res)} = {total}")
     return "\n".join(lines)
 
 
@@ -62,18 +63,19 @@ def _render_sub(a: int, b: int) -> tuple[int, str]:
     res: list[int] = []
     lines = [f"  |{a} - {b}| = {hi} - {lo}, least-significant digit first:"]
     for i in range(width):
-        x = dh[i] - dl[i] - borrow
-        if x < 0:
-            x += 10
+        raw = dh[i] - dl[i] - borrow
+        if raw < 0:
+            digit = raw + 10
             new_borrow = 1
         else:
+            digit = raw
             new_borrow = 0
         lines.append(
-            f"    col{i}: {dh[i]} - {dl[i]} - borrow {borrow} = {x} "
-            f"-> digit {x}, borrow {new_borrow}"
+            f"    col{i}: {dh[i]} - {dl[i]} - borrow {borrow} = {raw} "
+            f"-> digit {digit}, borrow {new_borrow}"
         )
         borrow = new_borrow
-        res.append(x)
+        res.append(digit)
     while len(res) > 1 and res[-1] == 0:
         res.pop()
     lines.append(f"    result digits (reversed): {_spaced_msb(res)} = {abs(a - b)}")
@@ -81,15 +83,22 @@ def _render_sub(a: int, b: int) -> tuple[int, str]:
 
 
 def _render_mul(a: int, b: int) -> tuple[int, str]:
-    # Single-digit partial products + shift-add (Goat decomposition).
+    # Single-digit partial products, then a carry-annotated column sum (Goat
+    # decomposition: turn 2-digit x 2-digit into learnable single-digit steps).
     db = _digits_lsb(b)
-    lines = [
-        f"  mul {a} * {b}: sum of single-digit partial products; carry handled in the shift-add:"
-    ]
+    lines = [f"  mul {a} * {b}: single-digit partial products, then add them:"]
+    partials: list[int] = []
     for i, d in enumerate(db):
         p = a * d * (10**i)
+        partials.append(p)
         lines.append(f"    {a} * {d} (digit {i} of {b}) shifted x10^{i} = {p}")
-    lines.append(f"    sum of partials = {a * b}")
+    running = partials[0]
+    for p in partials[1:]:
+        lines.append(
+            _render_columns("+", running, p, _digits_lsb(running), _digits_lsb(p))
+        )
+        running += p
+    lines.append(f"    product = {a * b}")
     return a * b, "\n".join(lines)
 
 
