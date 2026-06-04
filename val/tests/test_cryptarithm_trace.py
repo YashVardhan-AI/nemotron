@@ -189,3 +189,17 @@ def test_induct_within_token_budget():
     for _seed, problem, answer in _induct_arith_seeds():
         t = reasoning_cryptarithm_induct(problem, answer)
         assert len(t) < 16000, (len(t),)
+
+
+def test_corpus_induct_renderer_dispatches_and_falls_back():
+    from corpus import _crypt_renderer
+
+    render = _crypt_renderer("induct", seed=0)
+    produced = 0
+    for seed in range(12):
+        problem, answer = make_trace_problem(seed, 4)
+        trace = render(problem, answer)
+        assert trace is not None, seed  # induct OR fallback always yields a trace
+        assert trace.rstrip().endswith("\\boxed{" + answer + "}"), seed
+        produced += 1
+    assert produced == 12

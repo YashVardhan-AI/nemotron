@@ -207,6 +207,16 @@ def _crypt_renderer(style: str, seed: int):
             if seed % 2 == 0
             else reasoning_cryptarithm_propagate
         )
+    if style == "induct":
+        from reasoners.cryptarithm_trace import (
+            reasoning_cryptarithm_induct,
+        )
+
+        def _induct_or_fallback(problem, answer):
+            t = reasoning_cryptarithm_induct(problem, answer)
+            return t if t is not None else reasoning_cryptarithm_arith(problem, answer)
+
+        return _induct_or_fallback
     raise ValueError(f"unknown cryptarithm trace style: {style!r}")
 
 
