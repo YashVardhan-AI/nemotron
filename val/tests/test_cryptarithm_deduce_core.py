@@ -58,6 +58,8 @@ def test_backward_compatible_two_tuple_without_trace():
     assert len(result) == 2  # (answer, (mapping, op_info)) -- drop-in for investigator
 
 
+
+
 def _arith_only(examples):
     """The arithmetic demos (the search operates on these, like _solve)."""
     from reasoners.cryptarithm_deduce_core import _is_concat
@@ -71,8 +73,6 @@ def _arith_only(examples):
 
 
 def _reencode_query(found_map, op_info, q):
-    """Apply op_info[q[2]] to the query under found_map; return the answer string
-    or None if a needed digit has no glyph."""
     from reasoners.cryptarithm_deduce_core import _OP_NAMES, _OPS, num_to_digits
 
     left = 10 * found_map[q[0]] + found_map[q[1]]
@@ -89,21 +89,23 @@ def _reencode_query(found_map, op_info, q):
     return "".join(d2s[d] for d in rd)
 
 
-def test_search_recovers_a_sound_map_reproducing_the_answer():
-    # The narrated search must reach an INJECTIVE map that reproduces the planted
-    # query answer (soundness). It need not equal solve_problem's arbitrary first
-    # map -- the renderer guards strict equality separately.
-    checked = 0
+def _arith_seeds():
+    """(seed, examples, q_input, q_answer, mapping, op_info) for arith-query seeds."""
+    out = []
     for seed in range(40):
         _r, examples, q_input, q_answer = sample_solvable(seed, 4)
         data = _data(examples, q_input)
         _ans, (mapping, op_info) = solve_problem(data)
-        if not mapping:
-            continue  # concat-shortcut query: no digit search to narrate
+        if mapping:
+            out.append((seed, examples, q_input, q_answer, mapping, op_info))
+    return out
+
+
+def test_search_recovers_a_sound_map_reproducing_the_answer():
+    checked = 0
+    for seed, examples, q_input, q_answer, mapping, op_info in _arith_seeds():
         q = tuple(q_input)
-        result = search_with_log(
-            _arith_only(examples), q, op_info, planted_answer=q_answer
-        )
+        result = search_with_log(_arith_only(examples), q, op_info, mapping)
         assert result is not None, seed
         found_map, _log = result
         assert len(set(found_map.values())) == len(found_map), seed  # injective
@@ -112,65 +114,59 @@ def test_search_recovers_a_sound_map_reproducing_the_answer():
     assert checked > 0
 
 
-def test_search_usually_matches_the_authoritative_map():
-    # When the map is uniquely pinned (the common case for "well" determinacy),
-    # the search should find the SAME map solve_problem did. Require a strong
-    # majority so the renderer rarely has to skip a seed.
-    agree = total = 0
-    for seed in range(40):
-        _r, examples, q_input, q_answer = sample_solvable(seed, 4)
-        data = _data(examples, q_input)
-        _ans, (mapping, op_info) = solve_problem(data)
-        if not mapping:
-            continue
-        q = tuple(q_input)
-        result = search_with_log(
-            _arith_only(examples), q, op_info, planted_answer=q_answer
-        )
-        if result is None:
-            total += 1
-            continue
-        agree += int(result[0] == mapping)
-        total += 1
-    assert total > 0
-    assert agree >= 0.6 * total, (agree, total)
-
-
 def test_search_log_is_bounded_and_well_formed():
-    for seed in range(40):
-        _r, examples, q_input, q_answer = sample_solvable(seed, 4)
-        data = _data(examples, q_input)
-        _ans, (mapping, op_info) = solve_problem(data)
-        if not mapping:
-            continue
+    for seed, examples, q_input, _q_answer, mapping, op_info in _arith_seeds():
         q = tuple(q_input)
-        result = search_with_log(
-            _arith_only(examples), q, op_info, planted_answer=q_answer
-        )
-        if result is None:
-            continue
+        result = search_with_log(_arith_only(examples), q, op_info, mapping)
+        assert result is not None
         _m, log = result
         assert isinstance(log, list) and log
-        assert len(log) <= 200, (seed, len(log))
+        assert len(log) <= 80, (seed, len(log))  # winning-path is SHORT
         kinds = {r["kind"] for r in log}
         assert kinds <= {"assign", "forced", "reject", "backtrack", "solution"}
         assert log[-1]["kind"] == "solution"
 
 
-def test_search_emits_backtracking_somewhere_in_the_sweep():
-    saw_backtrack = False
-    for seed in range(40):
-        _r, examples, q_input, q_answer = sample_solvable(seed, 4)
-        data = _data(examples, q_input)
-        _ans, (mapping, op_info) = solve_problem(data)
-        if not mapping:
-            continue
+def _replay_to_state(log):
+    """Replay the log; assert the mapping stays injective at EVERY step. Return it."""
+    mapping: dict[str, int] = {}
+    for rec in log:
+        k = rec["kind"]
+        if k in ("assign", "forced"):
+            g, d = rec["glyph"], rec["digit"]
+            assert d not in mapping.values(), (k, g, d, dict(mapping))
+            assert g not in mapping, (k, g, dict(mapping))
+            mapping[g] = d
+        elif k == "backtrack":
+            mapping.pop(rec["glyph"], None)
+    return mapping
+
+
+def test_search_log_replays_to_injective_states_and_matches_solution():
+    checked = 0
+    for seed, examples, q_input, _q_answer, mapping, op_info in _arith_seeds():
         q = tuple(q_input)
-        result = search_with_log(
-            _arith_only(examples), q, op_info, planted_answer=q_answer
-        )
-        if result is None:
-            continue
-        if any(r["kind"] == "backtrack" for r in result[1]):
-            saw_backtrack = True
-    assert saw_backtrack  # genuine search, not a straight-line read-off
+        result = search_with_log(_arith_only(examples), q, op_info, mapping)
+        assert result is not None
+        found_map, log = result
+        replayed = _replay_to_state(log)
+        solution = next(r for r in log if r["kind"] == "solution")
+        assert replayed == solution["mapping"], seed
+        assert replayed == found_map, seed
+        checked += 1
+    assert checked > 0
+
+
+def test_search_log_shows_forced_deduction_and_ruling_out():
+    saw_forced = saw_ruling = False
+    for seed, examples, q_input, _q_answer, mapping, op_info in _arith_seeds():
+        q = tuple(q_input)
+        result = search_with_log(_arith_only(examples), q, op_info, mapping)
+        assert result is not None
+        log = result[1]
+        if any(r["kind"] == "forced" for r in log):
+            saw_forced = True
+        if any(r["kind"] in ("reject", "backtrack") for r in log):
+            saw_ruling = True
+    assert saw_forced  # genuine deduction: glyphs forced by demos
+    assert saw_ruling  # alternatives ruled out somewhere (light backtrack)

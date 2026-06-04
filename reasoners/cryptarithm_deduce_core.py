@@ -487,158 +487,210 @@ def sample_solvable(
     return last
 
 
-_SEARCH_NODE_CAP = 200_000
-_SEARCH_LOG_CAP = 200
+# --- winning-path search narration (consumed by reasoners/cryptarithm_trace) ---
+# The raw injective-map DFS is a ~200-step brute grind for these instances, giving
+# flailing, non-instructive traces. Instead we narrate the WINNING PATH toward the
+# authoritative solution map (from solve_problem): each glyph becomes known either
+# FORCED by a demo (uniquely determined given current knowledge) or GUESSED (a seed
+# digit, with genuine ruled-out alternatives). Short, replayable, faithful to how
+# the solution is reached. Record kinds: forced | assign | reject | backtrack |
+# solution. The log replays (assign/forced add, backtrack pops, reject/solution are
+# no-ops) to an injective mapping == the solution at every step.
+
+_LOCAL_SOL_CAP = 4000
 
 
-class _DigitSearch:
-    """Most-constrained-variable injective-map search over arithmetic demos with
-    operators already fixed (op_info). Records a compact decision log and stops at
-    the first complete consistent assignment. Bounded; returns None on cap.
-    """
+def _demo_glyphs(demo):
+    return {demo[0], demo[1], demo[3], demo[4], *demo[5]}
 
-    def __init__(self, examples, op_info):
-        # examples: list of (s0,s1,op,s3,s4,rsyms-tuple), all NON-concat.
-        self.examples = examples
-        self.op_info = op_info
-        self.mapping: dict[str, int] = {}
-        self.used: set[int] = set()
-        self.log: list[dict] = []
-        self.nodes = 0
-        self.capped = False
-        # Variable order: glyphs by descending occurrence (most-constrained-first
-        # proxy -- a glyph in many demos prunes fastest).
-        counts: Counter = Counter()
-        for s0, s1, _op, s3, s4, rsyms in examples:
-            for g in (s0, s1, s3, s4, *rsyms):
-                counts[g] += 1
-        self.order = [g for g, _ in counts.most_common()]
 
-    def _emit(self, rec):
-        # The terminal "solution" record is load-bearing for the renderer, so it
-        # always lands last (trimming an earlier record if the log is full); all
-        # other kinds are dropped once the cap is reached. Total stays <= cap.
-        if rec["kind"] == "solution":
-            if len(self.log) >= _SEARCH_LOG_CAP:
-                del self.log[-1]
-            self.log.append(rec)
-        elif len(self.log) < _SEARCH_LOG_CAP:
-            self.log.append(rec)
+def _demo_local_solutions(demo, op_info, known):
+    """Every full glyph->digit assignment EXTENDING `known` that satisfies this one
+    demo injectively. demo = (s0,s1,op,s3,s4,rsyms). Bounded by _LOCAL_SOL_CAP."""
+    s0, s1, op, s3, s4, rsyms = demo
+    name = op_info.get(op)
+    if name is None:
+        return []
+    operands = (s0, s1, s3, s4)
+    sols: list[dict[str, int]] = []
 
-    def _demo_check(self, ex) -> bool | None:
-        """True/False if ex is fully bound and (in)consistent; None if not yet
-        fully bound (cannot check)."""
-        s0, s1, op, s3, s4, rsyms = ex
-        if any(g not in self.mapping for g in (s0, s1, s3, s4)):
-            return None
-        left = 10 * self.mapping[s0] + self.mapping[s1]
-        right = 10 * self.mapping[s3] + self.mapping[s4]
-        name = self.op_info.get(op)
-        if name is None:
-            return None
-        rd = _op_result_digits(name, left, right)
-        if len(rd) != len(rsyms):
-            return False
-        for rs, rdig in zip(rsyms, rd):
-            if rs in self.mapping:
-                if self.mapping[rs] != rdig:
-                    return False
-            elif rdig in self.used:
-                return False  # injectivity: needed digit already taken
-        return True
-
-    def _bind_outputs(self, ex):
-        """Bind any output glyphs forced by a now-consistent demo; return the list
-        of (glyph, digit) bound so they can be undone."""
-        s0, s1, op, s3, s4, rsyms = ex
-        left = 10 * self.mapping[s0] + self.mapping[s1]
-        right = 10 * self.mapping[s3] + self.mapping[s4]
-        rd = _op_result_digits(self.op_info[op], left, right)
-        bound = []
-        for rs, rdig in zip(rsyms, rd):
-            if rs not in self.mapping:
-                self.mapping[rs] = rdig
-                self.used.add(rdig)
-                bound.append((rs, rdig))
-                self._emit(
-                    {
-                        "kind": "forced",
-                        "glyph": rs,
-                        "digit": rdig,
-                        "by": ex[0] + ex[1] + ex[2] + ex[3] + ex[4],
-                    }
-                )
-        return bound
-
-    def _undo(self, bound):
-        for g, d in reversed(bound):
-            del self.mapping[g]
-            self.used.discard(d)
-
-    def _next_var(self):
-        for g in self.order:
-            if g not in self.mapping:
-                return g
-        return None
-
-    def search(self) -> bool:
-        self.nodes += 1
-        if self.nodes > _SEARCH_NODE_CAP:
-            self.capped = True
-            return False
-        # Forward-check every fully-bound demo; bind forced outputs.
-        all_bound = []
-        for ex in self.examples:
-            ok = self._demo_check(ex)
-            if ok is False:
-                self._undo(all_bound)
-                return False
-            if ok is True:
-                all_bound += self._bind_outputs(ex)
-        var = self._next_var()
-        if var is None:
-            self._emit({"kind": "solution", "mapping": dict(self.mapping)})
-            return True
+    def rec(i, assign, used):
+        if len(sols) >= _LOCAL_SOL_CAP:
+            return
+        if i == 4:
+            left = 10 * assign[s0] + assign[s1]
+            right = 10 * assign[s3] + assign[s4]
+            rd = _op_result_digits(name, left, right)
+            if len(rd) != len(rsyms):
+                return
+            full = dict(assign)
+            u = set(used)
+            # Result glyphs already pinned in `known` constrain rd too (they are not
+            # operands, so they were never seeded into `assign`/`used`).
+            for rs in rsyms:
+                if rs not in full and rs in known:
+                    full[rs] = known[rs]
+                    u.add(known[rs])
+            for rs, rdig in zip(rsyms, rd):
+                if rs in full:
+                    if full[rs] != rdig:
+                        return
+                elif rdig in u:
+                    return
+                else:
+                    full[rs] = rdig
+                    u.add(rdig)
+            sols.append(full)
+            return
+        g = operands[i]
+        if g in assign:
+            rec(i + 1, assign, used)
+            return
+        if g in known:
+            assign[g] = known[g]
+            rec(i + 1, assign, used)
+            del assign[g]
+            return
         for d in range(10):
-            if d in self.used:
+            if d in used:
                 continue
-            self.mapping[var] = d
-            self.used.add(d)
-            self._emit({"kind": "assign", "glyph": var, "digit": d})
-            if self.search():
+            assign[g] = d
+            used.add(d)
+            rec(i + 1, assign, used)
+            used.discard(d)
+            del assign[g]
+
+    rec(0, {}, set(known.values()))
+    return sols
+
+
+def _demo_satisfiable(demo, op_info, known):
+    """False = a definite contradiction given `known` (no extending assignment
+    satisfies the demo). True = satisfiable or not yet fully constrained."""
+    return bool(_demo_local_solutions(demo, op_info, known))
+
+
+def _winning_path_log(demos, op_info, mapping, query=None):
+    needed = set()
+    for demo in demos:
+        needed |= _demo_glyphs(demo)
+    if query is not None:
+        needed |= {query[0], query[1], query[3], query[4]}
+    needed &= set(mapping)
+    known: dict[str, int] = {}
+    log: list[dict] = []
+
+    def dstr(demo):
+        return demo[0] + demo[1] + demo[2] + demo[3] + demo[4]
+
+    def try_force():
+        for demo in demos:
+            glyphs = _demo_glyphs(demo)
+            if glyphs <= set(known):
+                continue
+            sols = _demo_local_solutions(demo, op_info, known)
+            if not sols or len(sols) >= _LOCAL_SOL_CAP:
+                continue  # inconclusive (none, or capped -> not provably forced)
+            forced = {}
+            for g in glyphs:
+                if g in known:
+                    continue
+                vals = {s[g] for s in sols}
+                if len(vals) == 1:
+                    forced[g] = next(iter(vals))
+            if forced:
+                for g in sorted(forced, key=lambda x: forced[x]):
+                    assert mapping.get(g) == forced[g], (g, forced[g], mapping.get(g))
+                    known[g] = forced[g]
+                    log.append(
+                        {
+                            "kind": "forced",
+                            "glyph": g,
+                            "digit": forced[g],
+                            "by": dstr(demo),
+                        }
+                    )
                 return True
-            del self.mapping[var]
-            self.used.discard(d)
-            self._emit(
-                {
-                    "kind": "reject",
-                    "glyph": var,
-                    "digit": d,
-                    "reason": "no consistent completion",
-                }
-            )
-            self._emit({"kind": "backtrack", "glyph": var})
-        self._undo(all_bound)
         return False
 
+    def guess():
+        remaining = [g for g in needed if g not in known]
 
-def search_with_log(examples, query, op_info, planted_answer=None):
-    """Replay a most-constrained-first injective-map search over the arithmetic
-    demos (operators fixed by op_info) and return (mapping, decision_log), or None
-    if the search is capped or finds no solution.
+        def constraint(g):
+            best = 99
+            for demo in demos:
+                gl = _demo_glyphs(demo)
+                if g in gl:
+                    best = min(best, sum(1 for x in gl if x not in known))
+            return best
 
-    The query is folded in as an extra constraint (a demo-shaped example whose
-    output glyphs are the planted answer): the demos alone need not pin the full
-    digit map -- only demos+query together do (that is the generation contract of
-    `is_uniquely_solvable`). Including the query keeps the narrated search sound,
-    i.e. the returned map re-encodes the query to `planted_answer`.
-    """
-    search_examples = list(examples)
-    if query is not None and planted_answer is not None:
-        search_examples.append(
-            (query[0], query[1], query[2], query[3], query[4], tuple(planted_answer))
-        )
-    s = _DigitSearch(search_examples, dict(op_info))
-    if not s.search() or s.capped:
+        g = min(remaining, key=lambda x: (constraint(x), x))
+        d = mapping[g]
+        emitted = False
+        # (a) genuine immediate contradiction: a wrong, non-used digit that makes a
+        # demo containing g unsatisfiable -> show the failed attempt and backtrack.
+        for d0 in range(10):
+            if d0 == d or d0 in known.values():
+                continue
+            trial = dict(known)
+            trial[g] = d0
+            bad = next(
+                (
+                    demo
+                    for demo in demos
+                    if g in _demo_glyphs(demo)
+                    and not _demo_satisfiable(demo, op_info, trial)
+                ),
+                None,
+            )
+            if bad is not None:
+                log.append({"kind": "assign", "glyph": g, "digit": d0})
+                log.append(
+                    {
+                        "kind": "reject",
+                        "glyph": g,
+                        "digit": d0,
+                        "reason": f"breaks {dstr(bad)}",
+                    }
+                )
+                log.append({"kind": "backtrack", "glyph": g})
+                emitted = True
+                break
+        # (b) else, if any digit is already taken, note one injectivity ruling-out.
+        if not emitted and known:
+            for d0, owner in sorted((v, k) for k, v in known.items()):
+                if d0 != d:
+                    log.append(
+                        {
+                            "kind": "reject",
+                            "glyph": g,
+                            "digit": d0,
+                            "reason": f"digit {d0} already used by {owner}",
+                        }
+                    )
+                    break
+        known[g] = d
+        log.append({"kind": "assign", "glyph": g, "digit": d})
+
+    guard = 0
+    while needed - set(known):
+        guard += 1
+        if guard > 1000:
+            break
+        if try_force():
+            continue
+        guess()
+    log.append({"kind": "solution", "mapping": dict(known)})
+    return log
+
+
+def search_with_log(examples, query, op_info, mapping):
+    """Build a short, replayable WINNING-PATH decision log toward the authoritative
+    solution `mapping` (from solve_problem) over the arithmetic demos, with the
+    query glyphs included in the set to resolve. Returns (mapping, log), or None if
+    `mapping` is empty (pure concat-shortcut query: nothing to narrate)."""
+    if not mapping:
         return None
-    return dict(s.mapping), s.log
+    return dict(mapping), _winning_path_log(
+        list(examples), op_info, dict(mapping), query=query
+    )
