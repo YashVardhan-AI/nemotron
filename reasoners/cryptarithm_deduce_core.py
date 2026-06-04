@@ -485,3 +485,160 @@ def sample_solvable(
         if is_uniquely_solvable(examples, q_input, q_answer):
             return rule, examples, q_input, q_answer
     return last
+
+
+_SEARCH_NODE_CAP = 200_000
+_SEARCH_LOG_CAP = 200
+
+
+class _DigitSearch:
+    """Most-constrained-variable injective-map search over arithmetic demos with
+    operators already fixed (op_info). Records a compact decision log and stops at
+    the first complete consistent assignment. Bounded; returns None on cap.
+    """
+
+    def __init__(self, examples, op_info):
+        # examples: list of (s0,s1,op,s3,s4,rsyms-tuple), all NON-concat.
+        self.examples = examples
+        self.op_info = op_info
+        self.mapping: dict[str, int] = {}
+        self.used: set[int] = set()
+        self.log: list[dict] = []
+        self.nodes = 0
+        self.capped = False
+        # Variable order: glyphs by descending occurrence (most-constrained-first
+        # proxy -- a glyph in many demos prunes fastest).
+        counts: Counter = Counter()
+        for s0, s1, _op, s3, s4, rsyms in examples:
+            for g in (s0, s1, s3, s4, *rsyms):
+                counts[g] += 1
+        self.order = [g for g, _ in counts.most_common()]
+
+    def _emit(self, rec):
+        # The terminal "solution" record is load-bearing for the renderer, so it
+        # always lands last (trimming an earlier record if the log is full); all
+        # other kinds are dropped once the cap is reached. Total stays <= cap.
+        if rec["kind"] == "solution":
+            if len(self.log) >= _SEARCH_LOG_CAP:
+                del self.log[-1]
+            self.log.append(rec)
+        elif len(self.log) < _SEARCH_LOG_CAP:
+            self.log.append(rec)
+
+    def _demo_check(self, ex) -> bool | None:
+        """True/False if ex is fully bound and (in)consistent; None if not yet
+        fully bound (cannot check)."""
+        s0, s1, op, s3, s4, rsyms = ex
+        if any(g not in self.mapping for g in (s0, s1, s3, s4)):
+            return None
+        left = 10 * self.mapping[s0] + self.mapping[s1]
+        right = 10 * self.mapping[s3] + self.mapping[s4]
+        name = self.op_info.get(op)
+        if name is None:
+            return None
+        rd = _op_result_digits(name, left, right)
+        if len(rd) != len(rsyms):
+            return False
+        for rs, rdig in zip(rsyms, rd):
+            if rs in self.mapping:
+                if self.mapping[rs] != rdig:
+                    return False
+            elif rdig in self.used:
+                return False  # injectivity: needed digit already taken
+        return True
+
+    def _bind_outputs(self, ex):
+        """Bind any output glyphs forced by a now-consistent demo; return the list
+        of (glyph, digit) bound so they can be undone."""
+        s0, s1, op, s3, s4, rsyms = ex
+        left = 10 * self.mapping[s0] + self.mapping[s1]
+        right = 10 * self.mapping[s3] + self.mapping[s4]
+        rd = _op_result_digits(self.op_info[op], left, right)
+        bound = []
+        for rs, rdig in zip(rsyms, rd):
+            if rs not in self.mapping:
+                self.mapping[rs] = rdig
+                self.used.add(rdig)
+                bound.append((rs, rdig))
+                self._emit(
+                    {
+                        "kind": "forced",
+                        "glyph": rs,
+                        "digit": rdig,
+                        "by": ex[0] + ex[1] + ex[2] + ex[3] + ex[4],
+                    }
+                )
+        return bound
+
+    def _undo(self, bound):
+        for g, d in reversed(bound):
+            del self.mapping[g]
+            self.used.discard(d)
+
+    def _next_var(self):
+        for g in self.order:
+            if g not in self.mapping:
+                return g
+        return None
+
+    def search(self) -> bool:
+        self.nodes += 1
+        if self.nodes > _SEARCH_NODE_CAP:
+            self.capped = True
+            return False
+        # Forward-check every fully-bound demo; bind forced outputs.
+        all_bound = []
+        for ex in self.examples:
+            ok = self._demo_check(ex)
+            if ok is False:
+                self._undo(all_bound)
+                return False
+            if ok is True:
+                all_bound += self._bind_outputs(ex)
+        var = self._next_var()
+        if var is None:
+            self._emit({"kind": "solution", "mapping": dict(self.mapping)})
+            return True
+        for d in range(10):
+            if d in self.used:
+                continue
+            self.mapping[var] = d
+            self.used.add(d)
+            self._emit({"kind": "assign", "glyph": var, "digit": d})
+            if self.search():
+                return True
+            del self.mapping[var]
+            self.used.discard(d)
+            self._emit(
+                {
+                    "kind": "reject",
+                    "glyph": var,
+                    "digit": d,
+                    "reason": "no consistent completion",
+                }
+            )
+            self._emit({"kind": "backtrack", "glyph": var})
+        self._undo(all_bound)
+        return False
+
+
+def search_with_log(examples, query, op_info, planted_answer=None):
+    """Replay a most-constrained-first injective-map search over the arithmetic
+    demos (operators fixed by op_info) and return (mapping, decision_log), or None
+    if the search is capped or finds no solution.
+
+    The query is folded in as an extra constraint (a demo-shaped example whose
+    output glyphs are the planted answer): the demos alone need not pin the full
+    digit map -- only demos+query together do (that is the generation contract of
+    `is_uniquely_solvable`). Including the query keeps the narrated search sound,
+    i.e. the returned map re-encodes the query to `planted_answer`.
+    """
+    search_examples = list(examples)
+    if query is not None and planted_answer is not None:
+        search_examples.append(
+            (query[0], query[1], query[2], query[3], query[4], tuple(planted_answer))
+        )
+    s = _DigitSearch(search_examples, dict(op_info))
+    if not s.search() or s.capped:
+        return None
+    return dict(s.mapping), s.log
