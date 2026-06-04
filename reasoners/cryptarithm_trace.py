@@ -13,7 +13,13 @@ so each step is sound.
 
 from __future__ import annotations
 
-from reasoners.cryptarithm_deduce_core import sample_solvable, solve_problem
+from reasoners.cryptarithm_arith_render import long_arith
+from reasoners.cryptarithm_deduce_core import (
+    _is_concat,
+    sample_solvable,
+    search_with_log,
+    solve_problem,
+)
 from reasoners.cryptarithm_rule import num_to_digits, render_prompt
 from reasoners.store_types import Example, Problem
 
@@ -268,4 +274,133 @@ def reasoning_cryptarithm_propagate(problem: Problem, answer: str) -> str | None
 
     lines.append("Apply: " + _apply_line(qrec))
     lines.append(f"\\boxed{{{answer}}}")
+    return "\n".join(lines)
+
+
+def _arith_demos(problem) -> list[tuple]:
+    out = []
+    for e in problem.examples:
+        iv, ov = e.input_value, e.output_value
+        ex = (iv[0], iv[1], iv[2], iv[3], iv[4], tuple(ov))
+        if not _is_concat(ex):
+            out.append(ex)
+    return out
+
+
+def _state_block(mapping: dict, op_info: dict) -> str:
+    m = ", ".join(f"{g}={mapping[g]}" for g in sorted(mapping)) or "(none yet)"
+    ops = ", ".join(f"{g}->{op_info[g]}" for g in sorted(op_info))
+    return f"STATE | map: {{{m}}} | ops: {{{ops}}}"
+
+
+def _render_search(log: list[dict], op_info: dict) -> list[str]:
+    mapping: dict[str, int] = {}
+    lines: list[str] = []
+    for rec in log:
+        k = rec["kind"]
+        if k == "assign":
+            mapping[rec["glyph"]] = rec["digit"]
+            lines.append(f"  guess {rec['glyph']} = {rec['digit']}.")
+            lines.append("  " + _state_block(mapping, op_info))
+        elif k == "forced":
+            mapping[rec["glyph"]] = rec["digit"]
+            lines.append(
+                f"  forced {rec['glyph']} = {rec['digit']} by demo {rec['by']}."
+            )
+            lines.append("  " + _state_block(mapping, op_info))
+        elif k == "reject":
+            lines.append(f"  {rec['glyph']} = {rec['digit']} fails ({rec['reason']}).")
+        elif k == "backtrack":
+            mapping.pop(rec["glyph"], None)
+            lines.append(f"  backtrack on {rec['glyph']}.")
+        elif k == "solution":
+            lines.append("  complete assignment reached.")
+    return lines
+
+
+def _verify_roundtrip(problem, mapping, op_info) -> list[str]:
+    d2s = {d: s for s, d in mapping.items()}
+    lines = ["Step 3 - verify the recovered rule against EVERY demo:"]
+    for e in problem.examples:
+        iv, ov = e.input_value, e.output_value
+        ex = (iv[0], iv[1], iv[2], iv[3], iv[4], tuple(ov))
+        if _is_concat(ex):
+            lines.append(f"  {iv} = {ov}: concatenation, glyphs copied. matches.")
+            continue
+        name = op_info[iv[2]]
+        left = 10 * mapping[iv[0]] + mapping[iv[1]]
+        right = 10 * mapping[iv[3]] + mapping[iv[4]]
+        _val, cols = long_arith(name, left, right)
+        enc = "".join(d2s[d] for d in _result_digits(name, left, right))
+        status = "matches" if enc == ov else "MISMATCH"
+        lines.append(f"  {iv} = {ov}: {_OP_WORD[name]}")
+        lines.append(cols)
+        lines.append(f"    encode -> {enc}. {status}.")
+    digs = list(mapping.values())
+    inj = "all distinct" if len(set(digs)) == len(digs) else "INJECTIVITY VIOLATION"
+    lines.append(f"  injectivity round-trip: digits {sorted(digs)} - {inj}.")
+    return lines
+
+
+def _apply_induct(problem, answer, mapping, op_info) -> list[str]:
+    q = problem.question
+    name = op_info[q[2]]
+    d2s = {d: s for s, d in mapping.items()}
+    left = 10 * mapping[q[0]] + mapping[q[1]]
+    right = 10 * mapping[q[3]] + mapping[q[4]]
+    _val, cols = long_arith(name, left, right)
+    enc = "".join(d2s[d] for d in _result_digits(name, left, right))
+    return [
+        f"Step 4 - apply to the query {q}:",
+        f"  decode {q[0]}{q[1]} = {left}, {q[3]}{q[4]} = {right}; "
+        f"operator '{q[2]}' is the {_OP_WORD[name]}.",
+        cols,
+        f"  encode the result digits back to glyphs -> {enc}.",
+    ]
+
+
+def reasoning_cryptarithm_induct(problem: Problem, answer: str) -> str | None:
+    """Induction-search CoT: operator elimination (forward) + most-constrained-
+    first digit search with explicit backtracking + re-emitted STATE + round-trip
+    verify + reversed-digit arithmetic. Returns None for pure concat-shortcut
+    queries (no digit map -- caller falls back to the deduce style) or if the
+    boxed answer disagrees with the authority."""
+    data = _data(problem)
+    ans, (mapping, op_info), log = solve_problem(data, trace=True)
+    if ans != answer or not mapping:
+        return None
+    q = tuple(problem.question)
+    searched = search_with_log(_arith_demos(problem), q, op_info, mapping)
+    if searched is None:
+        return None
+    found_map, search_log = searched
+    if found_map != mapping:  # faithfulness guard (defensive; normally equal)
+        return None
+
+    op_recs = [r for r in log if r["kind"] == "op" and r["name"] is not None]
+    verifies = [r for r in log if r["kind"] == "verify"]
+    maprec = next((r for r in log if r["kind"] == "map"), None)
+
+    lines = [
+        "I must DEDUCE two things from the examples: what each operator glyph "
+        "does, and which digit each symbol stands for. I will search, not assume.",
+        (
+            "Each input is `s0 s1 op s3 s4`: two glyphs form a two-digit number, "
+            "an operator glyph, then two more glyphs form a second two-digit "
+            "number; the output spells the result's digits in the same secret "
+            "alphabet."
+        ),
+        "",
+        "Step 1 - pin each operator by elimination:",
+    ]
+    lines += [_resolve_op_line(r, verifies, maprec) for r in op_recs]
+    lines.append("")
+    lines.append("Step 2 - search the injective digit map (most-constrained first):")
+    lines += _render_search(search_log, op_info)
+    lines.append("")
+    lines += _verify_roundtrip(problem, mapping, op_info)
+    lines.append("")
+    lines += _apply_induct(problem, answer, mapping, op_info)
+    lines.append("")
+    lines.append(f"So the answer is \\boxed{{{answer}}}")
     return "\n".join(lines)

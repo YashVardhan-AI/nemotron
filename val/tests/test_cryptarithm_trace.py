@@ -7,6 +7,7 @@ from reasoners.cryptarithm_deduce_core import solve_problem
 from reasoners.cryptarithm_trace import (
     make_trace_problem,
     reasoning_cryptarithm_arith,
+    reasoning_cryptarithm_induct,
     reasoning_cryptarithm_propagate,
 )
 
@@ -132,3 +133,59 @@ def test_propagate_shows_a_correction():
         if "wrong" in low and "correct" in low:
             saw_correction = True
     assert saw_correction  # the compute-and-correct step fires on arith queries
+
+
+# --- Phase 4.4: induction-search CoT renderer --------------------------------
+
+
+def _induct_arith_seeds(lo=0, hi=40):
+    """Seeds whose query is arithmetic (digit map recovered) -- the induct style
+    targets these; concat-shortcut seeds fall back to the deduce style."""
+    out = []
+    for seed in range(lo, hi):
+        problem, answer = make_trace_problem(seed, 4)
+        if _is_arith_query(problem):
+            out.append((seed, problem, answer))
+    return out
+
+
+def test_induct_ends_with_correct_boxed_answer_and_is_sound():
+    seeds = _induct_arith_seeds()
+    assert seeds  # the sweep actually exercises arith queries
+    for seed, problem, answer in seeds:
+        trace = reasoning_cryptarithm_induct(problem, answer)
+        assert trace is not None, seed
+        assert trace.rstrip().endswith("\\boxed{" + answer + "}"), seed
+        assert "MISMATCH" not in trace, seed
+
+
+def test_induct_shows_state_blocks_and_backtracking_in_sweep():
+    saw_state = saw_backtrack = False
+    for _seed, problem, answer in _induct_arith_seeds():
+        t = reasoning_cryptarithm_induct(problem, answer)
+        if "STATE" in t:
+            saw_state = True
+        if "backtrack" in t.lower():
+            saw_backtrack = True
+    assert saw_state  # inductive scratchpad re-emits state
+    assert saw_backtrack  # genuine search appears somewhere
+
+
+def test_induct_includes_round_trip_injectivity_check():
+    for _seed, problem, answer in _induct_arith_seeds():
+        low = reasoning_cryptarithm_induct(problem, answer).lower()
+        assert "injectiv" in low or "all distinct" in low
+
+
+def test_induct_arithmetic_is_not_atomic():
+    saw_columns = False
+    for _seed, problem, answer in _induct_arith_seeds():
+        if "carry" in reasoning_cryptarithm_induct(problem, answer).lower():
+            saw_columns = True
+    assert saw_columns
+
+
+def test_induct_within_token_budget():
+    for _seed, problem, answer in _induct_arith_seeds():
+        t = reasoning_cryptarithm_induct(problem, answer)
+        assert len(t) < 16000, (len(t),)
