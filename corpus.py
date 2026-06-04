@@ -48,7 +48,7 @@ TOKEN_LIMIT = 8192
 # any val-reserved rule_signature is skipped, so no validation rule can leak into
 # training. Phase 6 sweeps CRYPT_N (size-matched ~600 vs scale 3-8k) and
 # CRYPT_STYLE (deduce | propagate | mixed). Set CRYPT_N = 0 to disable.
-CRYPT_N = 600
+CRYPT_N = 0
 CRYPT_STYLE = "deduce"
 CRYPT_DIFFICULTY = 4
 CRYPT_SEED_OFFSET = 1_000_000  # disjoint from val seeds (0..few-thousand)
@@ -65,6 +65,25 @@ CRYPT_REPLACE_REAL = True
 # instead -- the winning recipe's documented rates. Deterministic by problem_id
 # hash (stable across runs). Set DOWNSAMPLE_RATES = {} to keep every example.
 DOWNSAMPLE_RATES = {"numeral": 0.4, "gravity": 0.6, "unit_conversion": 0.6}
+
+# Per-category target row counts, reproducing the winning submission's exact
+# composition (frozen snapshot training/sft/04-08-16-14). The winning recipe was
+# NOT "all reasoning traces" -- it DOWNSAMPLED the saturated easy categories and
+# DUPLICATED the scarce/hard ones to give them more gradient steps. After the
+# unique pool is selected (reasoning files + DOWNSAMPLE_RATES), each category is
+# duplicated cyclically (or subsampled) to hit its target. Sum = 7830 rows.
+# Set DUP_TARGETS = {} to disable rebalancing (one row per unique trace).
+DUP_TARGETS = {
+    "bit_manipulation": 1754,
+    "cipher": 1656,
+    "unit_conversion": 1070,
+    "gravity": 1055,
+    "numeral": 730,
+    "equation_numeric_deduce": 658,
+    "cryptarithm_deduce": 627,
+    "cryptarithm_guess": 154,
+    "equation_numeric_guess": 126,
+}
 
 # Build speed: augmentation categories are NOT reasoning categories, so the
 # reasoning-only train filter discards them -- tokenizing ~8.5k of them just to
@@ -460,6 +479,29 @@ def main() -> None:
                     sf.write("\n")
 
             entries.append(entry)
+
+    # Rebalance each category to the winning submission's row count by duplicating
+    # (or subsampling) its unique pool. Duplicate entries reuse the same
+    # problem_id, so get_segment_path() still resolves to the one segment dir on
+    # disk -- N identical index lines become N training examples (no disk bloat).
+    # Categories absent from DUP_TARGETS (e.g. augmentations) pass through.
+    if DUP_TARGETS:
+        by_cat: dict[str, list[CorpusEntry]] = {}
+        for e in entries:
+            by_cat.setdefault(e.category, []).append(e)
+        rebalanced: list[CorpusEntry] = []
+        for cat, cat_entries in sorted(by_cat.items()):
+            target = DUP_TARGETS.get(cat)
+            if target is None:
+                rebalanced.extend(cat_entries)
+                continue
+            pool = sorted(cat_entries, key=lambda e: e.problem_id)
+            if len(pool) >= target:
+                rebalanced.extend(pool[:target])
+            else:
+                rebalanced.extend(pool[i % len(pool)] for i in range(target))
+            print(f"  rebalance {cat}: {len(pool)} unique -> {target} rows")
+        entries = rebalanced
 
     entries.sort(key=lambda e: e.problem_id)
 
