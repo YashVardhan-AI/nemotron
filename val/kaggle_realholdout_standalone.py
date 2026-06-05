@@ -44,6 +44,10 @@ OUT_JSON = "/kaggle/working/realholdout_report.json"
 # substitution circuit. A healthy adapter scores ~97% here; a damaged one drops.
 LOAD_CIPHER_CANARY = True
 CIPHER_CANARY_N = 200
+# Scaled in-distribution bit eval (the bit leaderboard proxy + the instrument for
+# measuring a bit-lever gain; the seen-data self-eval is only n~33 for bit).
+LOAD_BIT_RETENTION = True
+BIT_RETENTION_N = 250
 
 
 # %% ── Cell 2: grading (verbatim from the real scoring path) ─────────────────
@@ -175,12 +179,14 @@ def load_real_holdout(limit_per_category):
     return problems
 
 
-def load_cipher_canary(n):
-    """Score real cipher problems as a RETENTION canary (regression tripwire).
+def _load_real_sample(real_category, n, row_category):
+    """Score N real problems of *real_category* regardless of train membership.
 
-    Does NOT exclude trained ids -- this is intentionally a retention metric, not
-    a generalization one. Tagged 'cipher_canary' so it shows as its own row and
-    never contaminates the clean/floor holdout semantics.
+    This is a RETENTION / in-distribution metric (NOT generalization): the hidden
+    test is essentially in-distribution (seen-data accuracy ~= leaderboard), so a
+    big real sample is the leaderboard-predictive instrument AND a regression
+    tripwire. Tagged *row_category* so it never contaminates the clean/floor
+    holdout semantics.
     """
     root = _find_data_root()
     ids = []
@@ -190,7 +196,7 @@ def load_cipher_canary(n):
             if not line:
                 continue
             e = json.loads(line)
-            if e["category"] == "cipher":
+            if e["category"] == real_category:
                 ids.append(e["id"])
     problems = []
     for pid in sorted(ids)[:n]:
@@ -198,7 +204,7 @@ def load_cipher_canary(n):
         problems.append(
             RealProblem(
                 id=pid,
-                category="cipher_canary",
+                category=row_category,
                 prompt=str(d["prompt"]),
                 answer=str(d["answer"]),
                 n_examples=len(d.get("examples", [])),
@@ -206,6 +212,20 @@ def load_cipher_canary(n):
             )
         )
     return problems
+
+
+def load_cipher_canary(n):
+    """Real cipher retention canary (catches a substitution-circuit regression)."""
+    return _load_real_sample("cipher", n, "cipher_canary")
+
+
+def load_bit_retention(n):
+    """Real bit in-distribution eval at scale -- the bit leaderboard proxy.
+
+    The seen-data self-eval is only n~33 for bit, too noisy to see a +1.5% bit
+    gain (the lever). N>=250 real bit problems makes a +5% bit change clear noise.
+    """
+    return _load_real_sample("bit_manipulation", n, "bit_retention")
 
 
 # %% ── Cell 4: scoring + reporting ───────────────────────────────────────────
@@ -252,8 +272,8 @@ def format_table(report):
     lines.append("-" * 60)
     for cat in sorted(report):
         ov = report[cat]["overall"]
-        if cat == "cipher_canary":
-            tag = "canary"
+        if cat in ("cipher_canary", "bit_retention"):
+            tag = "real"  # in-distribution retention (leaderboard proxy), not a floor
         else:
             tag = "clean" if report[cat]["clean"] else "floor"
         lines.append(
@@ -296,6 +316,8 @@ def predict(eval_prompts):
 problems = load_real_holdout(LIMIT_PER_CATEGORY)
 if LOAD_CIPHER_CANARY:
     problems += load_cipher_canary(CIPHER_CANARY_N)
+if LOAD_BIT_RETENTION:
+    problems += load_bit_retention(BIT_RETENTION_N)
 print(
     f"holdout problems: {len(problems)} across {len({p.category for p in problems})} categories"
 )
