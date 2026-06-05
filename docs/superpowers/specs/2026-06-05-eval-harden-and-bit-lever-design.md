@@ -114,3 +114,28 @@ YELLOW/RED → stay shelved. Only after Phase 0 + Phase 1 land.
   logic and keep/extend the byte-identity guard.
 - **R-neighbor (Phase 1):** verbose bit traces crashing cipher/equation like induct did. Mitigate:
   short traces + neighbor A/B gate before shipping.
+
+## Status — Phase 0 IMPLEMENTED (2026-06-05, branch `feat/eval-harden`)
+
+All four Phase 0 slices landed, TDD, 111 val tests pass. Commits on `feat/eval-harden`:
+- **0.1 bit recalibration** (`466a8bf`): rule is now an independent per-column function with arbitrary
+  operands (pairwise/route/const/maj/choice/tt3), macro mix 65/20/15 kept; ported byte-identically to
+  the standalone (parity test).
+- **0.2 regression-sensitivity acceptance test** (`466a8bf`): a global-shift-only heuristic scores
+  **100% on the OLD generator but 13.3% on the NEW** (oracle 100% on both) — local proof, no GPU, that
+  the eval now drops a regressed/global-only adapter.
+- **0.4 brace-aware diagnostic extractor** (`ae4a650`): separate `extract_final_answer_braceaware`;
+  the verbatim mirror is untouched so the headline stays leaderboard-faithful.
+- **0.3 harness power** (`70cc290`): new-rule n 50→300; cipher `query_needs_vocab` stratification;
+  real-holdout cipher retention canary.
+
+**Premise correction (important).** The four-agent audit found the user's "generators too easy" premise
+was half-right: **bit was genuinely too easy** (structural — one global op/offset; fixed + proven
+sensitive). **Cipher was NOT** — it's a faithful clone of real; the apparent insensitivity was a
+*measurement artifact* (n=50 noise + comparing memorized-train n=162 vs fresh-synthetic n=50). So the
+cipher fix is harness power (n + canary), not the generator. See memory `synthetic-eval-too-easy`.
+
+**User follow-up (Kaggle GPU, not runnable on Windows):** re-run `val/kaggle_newrule_eval_standalone.py`
+with BOTH the 0.86 baseline adapter and the known-bad induct adapter. Acceptance: the induct adapter now
+scores measurably LOWER on bit (and ideally cipher needs-vocab) than baseline. That confirms on real
+weights what 0.2 proved on synthetic predictors. Only then trust bit numbers for Phase 1.
