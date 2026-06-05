@@ -10,6 +10,7 @@ generate. If they diverge, local val numbers won't predict the Kaggle run.
 from pathlib import Path
 
 from val.generators.bit_manipulation import generate as module_generate
+from val.generators.bit_manipulation import problem_tag
 from val.generators.cipher import generate as module_cipher_generate
 from val.generators.cipher import query_needs_vocab
 
@@ -34,8 +35,10 @@ def test_standalone_bit_matches_module():
         b = generate_bit(seed, 8)
         assert a.prompt == b.prompt, f"prompt mismatch at seed {seed}"
         assert a.answer == b.answer, f"answer mismatch at seed {seed}"
-        # family tag (module id suffix vs standalone meta) must also agree
-        assert a.id.split("-")[2] == b.meta, f"family mismatch at seed {seed}"
+        # family must agree (module id suffix vs standalone meta prefix) ...
+        assert a.id.split("-")[2] == b.meta.split("/")[0], f"family mismatch {seed}"
+        # ... and the full het/hom stratum tag must match problem_tag.
+        assert b.meta == problem_tag(seed), f"stratum mismatch at seed {seed}"
 
 
 def test_standalone_cipher_matches_module():

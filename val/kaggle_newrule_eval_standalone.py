@@ -276,10 +276,11 @@ def _pack(bits):
     return out
 
 
+_BIT_HET_PROB = 0.46  # P(heterogeneous); matches ~43% mix-ops / ~48% vary-offset
+
+
 def _bit_eval_column(col, x):
     kind = col[0]
-    if kind == "const":
-        return col[1]
     if kind == "route":
         _, p, neg = col
         b = _bitval(x, p)
@@ -298,85 +299,73 @@ def _bit_eval_column(col, x):
     if kind == "maj":
         _, p, q, r = col
         return 1 if (_bitval(x, p) + _bitval(x, q) + _bitval(x, r)) >= 2 else 0
-    if kind == "choice":
-        _, p, q, r = col
-        return _bitval(x, q) if _bitval(x, p) else _bitval(x, r)
-    # tt3: arbitrary 3-var truth table
-    _, p, q, r, table = col
-    idx = (_bitval(x, p) << 2) | (_bitval(x, q) << 1) | _bitval(x, r)
-    return (table >> idx) & 1
+    # choice
+    _, p, q, r = col
+    return _bitval(x, q) if _bitval(x, p) else _bitval(x, r)
 
 
-def _bit_rand_pair_column(rng):
-    op = rng.choice(_BIT_PAIR_OPS)
+def _bit_distinct_pair(rng):
     p = rng.randint(0, 7)
     q = rng.randint(0, 7)
     while q == p:
         q = rng.randint(0, 7)
-    return ("pair", op, p, q)
+    return p, q
 
 
-def _bit_rand_route_column(rng):
-    return ("route", rng.randint(0, 7), rng.random() < 0.3)
-
-
-def _bit_rand_three_column(rng):
-    kind = rng.choices(("choice", "maj", "tt3"), weights=(0.45, 0.20, 0.35))[0]
-    p, q, r = rng.sample(range(8), 3)
-    if kind == "maj":
-        return ("maj", p, q, r)
-    if kind == "choice":
-        return ("choice", p, q, r)
-    return ("tt3", p, q, r, rng.randint(1, 254))
-
-
-def _bit_build_columns(rng, profile):
-    cols = []
-    if profile == "pairwise":
-        for _ in range(8):
-            roll = rng.random()
-            if roll < 0.12:
-                cols.append(_bit_rand_route_column(rng))
-            elif roll < 0.20:
-                cols.append(("const", rng.randint(0, 1)))
-            else:
-                cols.append(_bit_rand_pair_column(rng))
-    elif profile == "rot":
+def _bit_build_columns(rng, profile, het):
+    if profile == "rot":
         glob_neg = rng.random() < 0.3
         if rng.random() < 0.90:
             k = rng.randint(1, 7)
-            cols = [("route", (j + k) % 8, glob_neg) for j in range(8)]
-        else:
-            perm = list(range(8))
-            rng.shuffle(perm)
-            cols = [("route", perm[j], glob_neg) for j in range(8)]
-    else:  # complex
-        three = set(rng.sample(range(8), rng.randint(1, 4)))
-        for j in range(8):
-            if j in three:
-                cols.append(_bit_rand_three_column(rng))
-            elif rng.random() < 0.15:
-                cols.append(_bit_rand_route_column(rng))
+            return [("route", (j + k) % 8, glob_neg) for j in range(8)]
+        perm = list(range(8))
+        rng.shuffle(perm)
+        return [("route", perm[j], glob_neg) for j in range(8)]
+    global_op = rng.choice(_BIT_PAIR_OPS)
+    a = rng.randint(0, 7)
+    b = (a + rng.randint(1, 7)) % 8
+    c = (a + rng.randint(1, 7)) % 8
+    three = set()
+    if profile == "complex":
+        three = set(rng.sample(range(8), rng.randint(1, 3)))
+    cols = []
+    for j in range(8):
+        if j in three:
+            kind = rng.choice(("maj", "choice"))
+            if het:
+                p, q, r = rng.sample(range(8), 3)
             else:
-                cols.append(_bit_rand_pair_column(rng))
+                p, q, r = (a + j) % 8, (b + j) % 8, (c + j) % 8
+            cols.append((kind, p, q, r))
+        else:
+            if het:
+                op = rng.choice(_BIT_PAIR_OPS)
+                p, q = _bit_distinct_pair(rng)
+            else:
+                op, p, q = global_op, (a + j) % 8, (b + j) % 8
+            cols.append(("pair", op, p, q))
     return cols
 
 
 def build_bit_rule(seed):
-    """Return (family, apply) for the rule selected by *seed*.
+    """Return (profile, het, apply) for the rule selected by *seed*.
 
-    family is one of 'pairwise' / 'rot' / 'complex'; apply(x:int)->int. Each
-    output bit is an INDEPENDENT function of arbitrary input bits.
+    profile is 'pairwise' / 'rot' / 'complex'; het => heterogeneous per-column.
+    Logic kept identical to val/generators/bit_manipulation.py.
     """
     rng = random.Random(seed)
     roll = rng.random()
     profile = "pairwise" if roll < 0.65 else ("rot" if roll < 0.85 else "complex")
-    cols = _bit_build_columns(rng, profile)
+    if profile != "rot":
+        het = rng.random() < _BIT_HET_PROB
+    else:
+        het = False
+    cols = _bit_build_columns(rng, profile, het)
 
     def apply(x):
         return _pack([_bit_eval_column(c, x) for c in cols])
 
-    return profile, apply
+    return profile, het, apply
 
 
 def _bit_distinct_inputs(seed, count):
@@ -392,7 +381,7 @@ def _bit_distinct_inputs(seed, count):
 
 
 def generate_bit(seed, difficulty):
-    family, apply = build_bit_rule(seed)
+    profile, het, apply = build_bit_rule(seed)
     values = _bit_distinct_inputs(seed, difficulty + 1)
     example_ints, query_int = values[:difficulty], values[difficulty]
     lines = [f"{format(x, '08b')} -> {format(apply(x), '08b')}" for x in example_ints]
@@ -402,13 +391,15 @@ def generate_bit(seed, difficulty):
         + "\n".join(lines)
         + f"\n\nNow, determine the output for: {query_bits}"
     )
+    # meta = family/homogeneity stratum (e.g. 'pairwise/het'); het is where a
+    # per-column-induction weakness or a regression shows.
     return Problem(
-        id=f"val-bit_manipulation-{family}-{seed}",
+        id=f"val-bit_manipulation-{profile}-{seed}",
         category="bit_manipulation",
         prompt=prompt,
         answer=format(apply(query_int), "08b"),
         n_examples=difficulty,
-        meta=family,
+        meta=f"{profile}/{'het' if het else 'hom'}",
     )
 
 

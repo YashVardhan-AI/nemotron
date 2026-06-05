@@ -12,19 +12,18 @@ regression-sensitive WITHOUT a GPU, by scoring two synthetic predictors:
                           skill)
 
 A trustworthy eval must: (a) let the oracle score ~100% on the NEW generator,
-(b) let the global-heuristic still ace OLD-style problems, but (c) drop the
-global-heuristic substantially on the NEW generator. (c) is the property that
-was missing.
+(b) let the global-heuristic still ace the HOMOGENEOUS stratum (clean +
+determinable), but (c) drop it sharply on the HETEROGENEOUS stratum. (c) is the
+property that was missing; (b) doubles as a determinability check.
 """
 
-import random
-
-from reasoners.store_types import Example, Problem
+from reasoners.store_types import Problem
 from val.generators.bit_manipulation import (
     _bit,
     _pack,
     build_rule,
     generate,
+    problem_tag,
 )
 
 _PAIR_OPS = ("AND", "OR", "XOR", "AND-NOT", "OR-NOT", "XOR-NOT")
@@ -106,34 +105,6 @@ def oracle_predict(problem: Problem, seed: int) -> str:
     return format(apply(int(problem.question, 2)), "08b")
 
 
-def _old_style_problem(seed: int, difficulty: int = 8) -> Problem:
-    """A problem whose rule IS a single global pairwise op (old distribution)."""
-    rng = random.Random(90_000 + seed)
-    op = rng.choice(_PAIR_OPS)
-    a = rng.randint(0, 7)
-    b = (a + rng.randint(1, 7)) % 8
-    vals, seen = [], set()
-    vrng = random.Random(seed * 13 + 7)
-    while len(vals) < difficulty + 1:
-        v = vrng.randint(0, 255)
-        if v not in seen:
-            seen.add(v)
-            vals.append(v)
-    examples = [
-        Example(format(x, "08b"), format(_apply_pair(op, a, b, x), "08b"))
-        for x in vals[:difficulty]
-    ]
-    q = vals[difficulty]
-    return Problem(
-        id=f"old-{seed}",
-        category="bit_manipulation",
-        examples=examples,
-        question=format(q, "08b"),
-        answer=format(_apply_pair(op, a, b, q), "08b"),
-        prompt="",
-    )
-
-
 def _acc(predicted, problems):
     return sum(p.answer == pred for p, pred in zip(problems, predicted)) / len(problems)
 
@@ -144,18 +115,37 @@ def test_recalibrated_generator_is_regression_sensitive():
 
     oracle = [oracle_predict(p, s) for s, p in zip(seeds, new_problems)]
     heur_new = [global_heuristic_predict(p) for p in new_problems]
-    old_problems = [_old_style_problem(s) for s in seeds]
-    heur_old = [global_heuristic_predict(p) for p in old_problems]
 
     acc_oracle = _acc(oracle, new_problems)
     acc_heur_new = _acc(heur_new, new_problems)
-    acc_heur_old = _acc(heur_old, old_problems)
 
     # (a) the eval is solvable: a correct reasoner aces the NEW generator.
     assert acc_oracle > 0.99, acc_oracle
-    # (b) the global-heuristic is competent on the OLD distribution it models.
-    assert acc_heur_old > 0.85, acc_heur_old
-    # (c) THE KEY PROPERTY: the same heuristic drops sharply on the NEW
-    #     generator — i.e. a regressed/global-only model now scores lower.
-    assert acc_heur_new < 0.60, acc_heur_new
-    assert acc_heur_old - acc_heur_new > 0.30, (acc_heur_old, acc_heur_new)
+
+    # Split by homogeneity stratum (the calibrated mixture).
+    hom = [
+        (p, h)
+        for s, p, h in zip(seeds, new_problems, heur_new)
+        if "/hom" in problem_tag(s)
+    ]
+    het = [
+        (p, h)
+        for s, p, h in zip(seeds, new_problems, heur_new)
+        if "/het" in problem_tag(s)
+    ]
+    assert hom and het, (len(hom), len(het))
+    acc_hom = sum(p.answer == h for p, h in hom) / len(hom)
+    acc_het = sum(p.answer == h for p, h in het) / len(het)
+
+    # (b) HOMOGENEOUS problems are clean + mostly determinable: a global-rule
+    #     model (whose hypothesis space contains them) solves ~all of them. The
+    #     residual ~10% is example-ambiguity that matches real's ~15% irreducible
+    #     rate (same offset for baseline + trained, so A/B-neutral).
+    assert acc_hom > 0.85, acc_hom
+    # (c) THE KEY PROPERTY: the same global-only model collapses on the
+    #     HETEROGENEOUS stratum — that's where a regression/global-only model is
+    #     visibly worse, and where the per-column-induction skill is measured.
+    assert acc_het < 0.55, acc_het
+    assert acc_hom - acc_het > 0.30, (acc_hom, acc_het)
+    # And in aggregate the heuristic is meaningfully below a real reasoner.
+    assert acc_heur_new < 0.80, acc_heur_new
