@@ -48,8 +48,8 @@ TOKEN_LIMIT = 8192
 # any val-reserved rule_signature is skipped, so no validation rule can leak into
 # training. Phase 6 sweeps CRYPT_N (size-matched ~600 vs scale 3-8k) and
 # CRYPT_STYLE (deduce | propagate | mixed). Set CRYPT_N = 0 to disable.
-CRYPT_N = 0
-CRYPT_STYLE = "deduce"
+CRYPT_N = 627
+CRYPT_STYLE = "induct"
 CRYPT_DIFFICULTY = 4
 CRYPT_SEED_OFFSET = 1_000_000  # disjoint from val seeds (0..few-thousand)
 HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
@@ -59,6 +59,19 @@ HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
 # signal -- the root cause of the ~6% baseline). When forward-gen is on, REPLACE
 # them with the verified forward-gen traces rather than mixing both.
 CRYPT_REPLACE_REAL = True
+
+# --- bit_manipulation forward-gen (the bit lever) ----------------------------
+# ADD N verified per-bit-induction traces for the families the corpus does NOT
+# teach: complex 3-input (the solver reasoners/bit_manipulation.py cannot express
+# MAJ/CHOICE, so no good real traces exist) + heterogeneous per-column pairwise.
+# These ADD to the real bit rows (which cover the easy 2-input/rotation families).
+# Seeds start high (disjoint from val AND cryptarithm seeds); any val-reserved
+# rule_signature is skipped, so no validation rule can leak. Set BIT_N = 0 to off.
+BIT_N = 0
+BIT_DIFFICULTY = 8  # real bit gives 7-10 examples (avg ~8.6)
+BIT_SEED_OFFSET = 2_000_000  # disjoint from val (~0..few-k) and cryptarithm (1e6)
+# Forward-gen only the WEAK tier; skip pairwise/hom + rot the model already does.
+BIT_TARGET_TAGS = ("complex/het", "complex/hom", "pairwise/het")
 
 # Downsample the SATURATED categories (numeral/gravity/unit_conversion generalize
 # at ~100% on unseen rules) so training capacity goes to the hard categories
@@ -86,11 +99,12 @@ DUP_TARGETS = {
 }
 
 # Build speed: augmentation categories are NOT reasoning categories, so the
-# reasoning-only train filter discards them -- tokenizing ~8.5k of them just to
-# throw them away ~doubles the build time. Set BUILD_AUGMENTATIONS=0 (env) or
-# False to skip them for fast reasoning-only rebuilds across Phase 6 arms.
-# Default True preserves the full-corpus behavior.
-BUILD_AUGMENTATIONS = os.environ.get("BUILD_AUGMENTATIONS", "1") != "0"
+# reasoning-only train filter (train_sft.filter_training_examples) discards them
+# anyway -- tokenizing ~8.5k of them just to throw them away ~doubles the build
+# time. DEFAULT FALSE: the submission/training path is reasoning-only, so we don't
+# build augmented traces at all. Set BUILD_AUGMENTATIONS=1 (env) to build the full
+# (non-submission) corpus.
+BUILD_AUGMENTATIONS = os.environ.get("BUILD_AUGMENTATIONS", "0") != "0"
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -312,6 +326,100 @@ def _load_cryptarithm_holdout() -> set[str]:
     )
 
 
+def _load_bit_holdout() -> set[str]:
+    if not HOLDOUT_RULES.exists():
+        return set()
+    return set(
+        json.loads(HOLDOUT_RULES.read_text(encoding="utf-8")).get(
+            "bit_manipulation", []
+        )
+    )
+
+
+def build_bit_examples(
+    n: int,
+    holdout: set[str],
+    *,
+    difficulty: int = BIT_DIFFICULTY,
+    seed_offset: int = BIT_SEED_OFFSET,
+    target_tags: tuple[str, ...] = BIT_TARGET_TAGS,
+) -> list[tuple[str, str, str, str]]:
+    """Tokenizer-free generator of N distinct verified bit_manipulation rows.
+
+    Returns (problem_id, prompt_text, completion_text, answer) tuples for the WEAK
+    families (complex 3-input + heterogeneous pairwise). Each trace is sound by
+    construction (the renderer returns None unless its per-bit rules reproduce
+    every example and its applied output equals the answer). Skips val-reserved
+    signatures; seeds start at *seed_offset*, disjoint from the val generator.
+    """
+    from reasoners.bit_rule import problem_tag, rule_signature
+    from reasoners.bit_trace import make_bit_trace_problem, reasoning_bit_perbit
+
+    targets = set(target_tags)
+    out: list[tuple[str, str, str, str]] = []
+    seed = seed_offset
+    guard = seed_offset + 100 * (n + 1)  # generous; weak-tier is ~half of seeds
+    while len(out) < n and seed < guard:
+        tag = problem_tag(seed)
+        if tag not in targets or rule_signature(seed) in holdout:
+            seed += 1
+            continue
+        problem, answer, cols = make_bit_trace_problem(seed, difficulty)
+        reasoning = reasoning_bit_perbit(problem, answer, cols)
+        if reasoning is None:  # unsound (should not happen for forward-gen); skip
+            seed += 1
+            continue
+        completion = f"{reasoning}\n</think>\n\\boxed{{{answer}}}<|im_end|>"
+        pid = f"bit-{tag.replace('/', '-')}-{seed}"
+        out.append((pid, problem.prompt, completion, answer))
+        seed += 1
+    return out
+
+
+def build_bit_rows(
+    n: int,
+    holdout: set[str],
+    tokenizer,
+    chat_tokenizer,
+    *,
+    difficulty: int = BIT_DIFFICULTY,
+    write_segments_to: Path | None = None,
+) -> list[CorpusEntry]:
+    """Tokenize build_bit_examples into CorpusEntry rows (prompt masked, completion
+    unmasked), matching the real-problem path."""
+    rows: list[CorpusEntry] = []
+    for pid, prompt_text, completion_text, answer in build_bit_examples(
+        n, holdout, difficulty=difficulty
+    ):
+        completion_ids = tokenizer.encode(completion_text, add_special_tokens=False).ids
+        prompt_ids = tokenize_prompt(prompt_text, chat_tokenizer)
+        all_tokens = prompt_ids + completion_ids
+        mask = [0] * len(prompt_ids) + [1] * len(completion_ids)
+        if len(all_tokens) > TOKEN_LIMIT:
+            all_tokens = all_tokens[:TOKEN_LIMIT]
+            mask = mask[:TOKEN_LIMIT]
+        unmasked = sum(mask)
+        entry = CorpusEntry(
+            problem_id=pid,
+            category="bit_manipulation",
+            tokens=all_tokens,
+            mask=mask,
+            masked_token_count=len(mask) - unmasked,
+            unmasked_token_count=unmasked,
+            answer=answer,
+            included=True,
+        )
+        if write_segments_to is not None:
+            problem_dir = write_segments_to / pid
+            problem_dir.mkdir(parents=True, exist_ok=True)
+            with open(problem_dir / "synthetic.jsonl", "w", encoding="utf-8") as f:
+                for seg in build_segments(all_tokens, mask):
+                    json.dump(seg, f)
+                    f.write("\n")
+        rows.append(entry)
+    return rows
+
+
 def main() -> None:
     if not PROBLEMS_INDEX.exists():
         print(f"No {PROBLEMS_INDEX} found. Run problems.py first.")
@@ -436,6 +544,21 @@ def main() -> None:
         print(
             f"Added {len(crypt_rows)} cryptarithm_deduce forward-gen rows "
             f"(style={CRYPT_STYLE})"
+        )
+
+    # Add forward-generated bit_manipulation traces for the weak tier (the lever).
+    if BIT_N > 0:
+        bit_rows = build_bit_rows(
+            BIT_N,
+            _load_bit_holdout(),
+            tokenizer,
+            chat_tokenizer,
+            write_segments_to=CORPUS_DIR,
+        )
+        entries.extend(bit_rows)
+        print(
+            f"Added {len(bit_rows)} bit_manipulation forward-gen rows "
+            f"(tags={'/'.join(BIT_TARGET_TAGS)})"
         )
 
     # Process augmentations/*.txt (no reasoning, no \boxed{}).
