@@ -22,7 +22,15 @@
 ADAPTER_PATH = (
     "/kaggle/working"  # dir with adapter_config.json + adapter_model.safetensors
 )
-PER_CATEGORY = 50  # how many distinct new rules per generator
+# How many distinct new rules per generator. n=50 was severely under-powered:
+# a 45-pt real regression read as noise (~+-7pt band at n=50), which is how the
+# induct adapter's cipher crash was MISSED. >=300 makes a few-pt drop detectable.
+PER_CATEGORY = 300
+CATEGORY_N = {  # per-category override (cryptarithm is solver-filtered => slower)
+    "cipher": 300,
+    "bit_manipulation": 300,
+    "cryptarithm_deduce": 150,
+}
 # Match the MEASURED real example counts per category (problems.jsonl): bit
 # problems give 7-10 examples (avg 8.6), cipher gives 3-5 (avg 4.0). Running both
 # at a flat 6 under-determined bit (pessimistic) and over-fed cipher.
@@ -224,13 +232,20 @@ def generate_cipher(seed, difficulty):
         + "\n".join(lines)
         + f"\nNow, decrypt the following text: {cipher_query}"
     )
+    # Stratify on whether the query needs vocab knowledge (a cipher letter not
+    # shown in any example ciphertext) -- the ~62% of real queries where a
+    # substitution-circuit regression actually shows up. An aggregate dilutes it.
+    seen_ct = set()
+    for p in plain_examples:
+        seen_ct.update(ch for ch in _encrypt(p, alphabet) if ch.isalpha())
+    needs_vocab = any(ch.isalpha() and ch not in seen_ct for ch in cipher_query)
     return Problem(
         id=f"val-cipher-{seed}",
         category="cipher",
         prompt=prompt,
         answer=plain_query,
         n_examples=difficulty,
-        meta="substitution",
+        meta="needs_vocab" if needs_vocab else "seen",
     )
 
 
@@ -918,10 +933,15 @@ def predict(eval_prompts):
     return [o.outputs[0].text for o in outputs]
 
 
-problems = [generate_cipher(s, CIPHER_DIFFICULTY) for s in range(PER_CATEGORY)]
-problems += [generate_bit(s, BIT_DIFFICULTY) for s in range(PER_CATEGORY)]
+def _n(cat):
+    return CATEGORY_N.get(cat, PER_CATEGORY)
+
+
+problems = [generate_cipher(s, CIPHER_DIFFICULTY) for s in range(_n("cipher"))]
+problems += [generate_bit(s, BIT_DIFFICULTY) for s in range(_n("bit_manipulation"))]
 problems += [
-    generate_cryptarithm(s, CRYPTARITHM_DIFFICULTY) for s in range(PER_CATEGORY)
+    generate_cryptarithm(s, CRYPTARITHM_DIFFICULTY)
+    for s in range(_n("cryptarithm_deduce"))
 ]
 
 # Score in batches so we keep vLLM's throughput but still see accuracy climb.
@@ -994,6 +1014,24 @@ if fam_seen:
             f"  {fam:<10} {n:>4} {fam_hit[fam] / n * 100:>7.1f} "
             f"{fam_hit_strict[fam] / n * 100:>11.1f}"
         )
+
+# Per-stratum breakdown for cipher: needs_vocab (query has a letter unseen in the
+# examples -> requires recognizing the word against the fixed vocab) vs seen. A
+# substitution-circuit regression concentrates in needs_vocab, so this is the
+# stratum that makes the cipher metric regression-sensitive; the aggregate hides it.
+cv_seen = defaultdict(int)
+cv_hit = defaultdict(int)
+for r in results:
+    if r["category"] != "cipher":
+        continue
+    cv_seen[r["meta"]] += 1
+    cv_hit[r["meta"]] += int(r["correct"])
+if cv_seen:
+    print("\ncipher by query stratum:")
+    print(f"  {'stratum':<12} {'N':>4} {'Acc%':>7}")
+    for stratum in sorted(cv_seen):
+        n = cv_seen[stratum]
+        print(f"  {stratum:<12} {n:>4} {cv_hit[stratum] / n * 100:>7.1f}")
 
 # Per-query-op breakdown for cryptarithm_deduce. The current adapter trained on
 # concat-only traces, so the baseline score should be concentrated in

@@ -35,6 +35,15 @@ LIMIT_PER_CATEGORY = (
 )
 BATCH_SIZE = 64  # = vLLM max_num_seqs; accuracy prints after each batch
 OUT_JSON = "/kaggle/working/realholdout_report.json"
+# cipher is ~100% solved + not downsampled, so it's nearly ABSENT from the
+# snapshot-complement holdout -> there was no apples-to-apples real cipher number,
+# which is how the induct run's substitution crash (real cipher 97.5->52.5) went
+# unseen. This adds a RETENTION canary: score real cipher problems (regardless of
+# train membership) as a separate 'cipher_canary' row. It is NOT a generalization
+# number (these were likely trained) -- it's a regression tripwire on the
+# substitution circuit. A healthy adapter scores ~97% here; a damaged one drops.
+LOAD_CIPHER_CANARY = True
+CIPHER_CANARY_N = 200
 
 
 # %% ── Cell 2: grading (verbatim from the real scoring path) ─────────────────
@@ -166,6 +175,39 @@ def load_real_holdout(limit_per_category):
     return problems
 
 
+def load_cipher_canary(n):
+    """Score real cipher problems as a RETENTION canary (regression tripwire).
+
+    Does NOT exclude trained ids -- this is intentionally a retention metric, not
+    a generalization one. Tagged 'cipher_canary' so it shows as its own row and
+    never contaminates the clean/floor holdout semantics.
+    """
+    root = _find_data_root()
+    ids = []
+    with open(os.path.join(root, "problems.jsonl")) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            e = json.loads(line)
+            if e["category"] == "cipher":
+                ids.append(e["id"])
+    problems = []
+    for pid in sorted(ids)[:n]:
+        d = json.loads(open(os.path.join(root, "problems", f"{pid}.jsonl")).read())
+        problems.append(
+            RealProblem(
+                id=pid,
+                category="cipher_canary",
+                prompt=str(d["prompt"]),
+                answer=str(d["answer"]),
+                n_examples=len(d.get("examples", [])),
+                clean=False,
+            )
+        )
+    return problems
+
+
 # %% ── Cell 4: scoring + reporting ───────────────────────────────────────────
 from collections import defaultdict
 
@@ -210,7 +252,10 @@ def format_table(report):
     lines.append("-" * 60)
     for cat in sorted(report):
         ov = report[cat]["overall"]
-        tag = "clean" if report[cat]["clean"] else "floor"
+        if cat == "cipher_canary":
+            tag = "canary"
+        else:
+            tag = "clean" if report[cat]["clean"] else "floor"
         lines.append(
             f"{cat:<24} {tag:<6} {ov['n']:>5} "
             f"{ov['accuracy'] * 100:>8.1f} {ov['accuracy_strict'] * 100:>11.1f}"
@@ -249,6 +294,8 @@ def predict(eval_prompts):
 
 
 problems = load_real_holdout(LIMIT_PER_CATEGORY)
+if LOAD_CIPHER_CANARY:
+    problems += load_cipher_canary(CIPHER_CANARY_N)
 print(
     f"holdout problems: {len(problems)} across {len({p.category for p in problems})} categories"
 )

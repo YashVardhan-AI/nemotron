@@ -43,6 +43,22 @@ def _sentence(rng: random.Random) -> str:
     return " ".join(rng.choice(_WORDS) for _ in range(n))
 
 
+def query_needs_vocab(problem: Problem) -> bool:
+    """True if the query has a cipher letter absent from ALL example ciphertexts.
+
+    Such queries cannot be decoded by direct substitution lookup alone — the
+    missing letter's mapping is unobserved, so the solver must recognize the
+    plaintext word against the fixed Wonderland vocab. ~62% of real cipher
+    queries are needs-vocab, and a regression in the substitution circuit
+    concentrates here — so stratifying the metric on this flag makes it
+    regression-sensitive (an aggregate number dilutes the signal).
+    """
+    seen = set()
+    for e in problem.examples:
+        seen.update(ch for ch in e.input_value if ch.isalpha())
+    return any(ch.isalpha() and ch not in seen for ch in problem.question)
+
+
 def generate(seed: int, difficulty: int) -> Problem:
     rng = random.Random(seed)
     alphabet = _alphabet(seed)
