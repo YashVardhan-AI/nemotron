@@ -1,4 +1,9 @@
-from val.grading import extract_final_answer, verify, verify_strict
+from val.grading import (
+    extract_final_answer,
+    extract_final_answer_braceaware,
+    verify,
+    verify_strict,
+)
 
 
 def test_extract_boxed():
@@ -38,3 +43,23 @@ def test_verify_binary_is_float_lenient():
 def test_verify_strict_binary_is_exact():
     assert verify_strict("11011011", "11011010") is False
     assert verify_strict("11011011", "11011011") is True
+
+
+def test_braceaware_recovers_answer_with_closing_brace():
+    # The verbatim grader truncates at the first `}`; the diagnostic recovers it.
+    text = r"so the result is \boxed{a}b}"
+    assert extract_final_answer(text) == "a"  # the leaderboard cap
+    assert extract_final_answer_braceaware(text) == "a}b"  # true answer
+
+
+def test_braceaware_matches_verbatim_on_normal_answers():
+    assert extract_final_answer_braceaware(r"x = \boxed{42}") == "42"
+
+
+def test_braceaware_takes_last_boxed():
+    assert extract_final_answer_braceaware(r"\boxed{1} then \boxed{x}y}") == "x}y"
+
+
+def test_braceaware_falls_back_without_boxed():
+    assert extract_final_answer_braceaware("The final answer is: 7") == "7"
+    assert extract_final_answer_braceaware(None) == "NOT_FOUND"

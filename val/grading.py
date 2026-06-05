@@ -51,6 +51,32 @@ def verify(stored_answer: str, predicted: str) -> bool:
         return predicted.lower() == stored_answer.lower()
 
 
+def extract_final_answer_braceaware(text: str | None) -> str:
+    """Diagnostic-only extractor that survives a `}` inside the answer.
+
+    The competition grader (mirrored verbatim in `extract_final_answer`) uses
+    `\\boxed\\{([^}]*)...` which truncates at the FIRST `}` — so any answer
+    containing `}` is mis-extracted even when the model emitted it correctly
+    (measured: ~11.9% of cryptarithm answers contain `}`; see memory
+    `boxed-brace-grading-bug`). This is a real, UNFIXABLE leaderboard cap (the
+    competition grader is fixed), so it must NOT change `extract_final_answer`.
+
+    This variant takes the last `\\boxed{` and reads to the LAST `}`, recovering
+    brace-containing answers. Use it ONLY to measure the model's true reasoning
+    un-blinded from the grader cap — never as the headline/leaderboard number.
+    """
+    if text is None:
+        return "NOT_FOUND"
+    idx = text.rfind("\\boxed{")
+    if idx != -1:
+        rest = text[idx + len("\\boxed{") :]
+        end = rest.rfind("}")
+        content = (rest[:end] if end != -1 else rest).strip()
+        if content:
+            return content
+    return extract_final_answer(text)
+
+
 def verify_strict(stored_answer: str, predicted: str) -> bool:
     """Diagnostic-only: like reasoners.reasoning.compare_answer — exact on binary.
 
