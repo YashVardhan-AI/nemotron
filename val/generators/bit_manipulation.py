@@ -1,17 +1,25 @@
 """Generator: new 8-bit rules drawn from the REAL bit_manipulation grammar.
 
-Empirically (1,602 train problems, and the solver's 85% rule_found rate), real
-bit rules are overwhelmingly **per-output-bit functions of a few input bits**:
-  ~65%  pairwise 2-input boolean   out[j] = op(in[a+j], in[b+j]), op in
-                                   {AND, OR, XOR, AND-NOT, OR-NOT, XOR-NOT}
-  ~20%  rotation / shift (+NOT)    out[j] = in[(j+k) % 8]   (the routing bulk)
-  ~15%  complex 3-input            majority / choice of three input bits
-                                   (the hard tail the 2-input solver can't express)
-Affine-mod-256, xor-mask and arbitrary permutations are ~0% of real data, so we
-do NOT generate them (an earlier version did, which made the eval out-of-distribution).
-All rules are stride-structured (offset + j) so they're well-determined from a
-handful of demos, matching the solver's run-based problems. Answers are correct
-by construction.
+Empirically (1,602 train problems + the solver's 85% rule_found rate), real bit
+rules are **per-output-bit functions of a few input bits**, and crucially they are
+HETEROGENEOUS across the 8 columns:
+  - 42.6% of real problems mix >=2 distinct binary ops across the 8 output bits
+  - 48.2% have operand offsets that VARY by column (not one global `(a+j,b+j)`)
+  - identity-routing `out[j]=in[p]` (p!=j) is the single most common per-bit op
+  - the complex tail includes arbitrary 3-var truth tables, not just MAJ/CHOICE
+
+Coarse family mix (calibrated to real): ~65% pairwise-2input / ~20% routing
+(rotation, occasionally an arbitrary permutation) / ~15% complex (>=1 three-input
+column: majority / choice / arbitrary truth table). Affine-mod-256, xor-mask and
+global permutations as a *family* are ~0% of real data, so we don't emit them.
+
+The earlier version of this generator applied ONE global op at ONE global offset
+across all 8 bits. That made the eval pattern-matchable from a single column and
+INSENSITIVE TO REGRESSIONS (a model that kept only the global-shift heuristic
+scored high). This version builds an INDEPENDENT rule per output bit with
+arbitrary operands, so inducing the rule requires genuine per-column reasoning.
+Answers are correct by construction; example sets may under-determine some columns
+(real data does too) but the answer key always applies the ground-truth rule.
 """
 
 import random
@@ -28,6 +36,15 @@ _HEADER = (
 
 _PAIR_OPS = ("AND", "OR", "XOR", "AND-NOT", "OR-NOT", "XOR-NOT")
 
+# A "column rule" is a tuple (kind, *params) describing how one output bit is
+# computed from input bits:
+#   ("const", v)            -> v
+#   ("route", p, neg)       -> in[p]   (xor neg)         (identity routing / NOT)
+#   ("pair", op, p, q)      -> op(in[p], in[q])          (2-input boolean)
+#   ("maj", p, q, r)        -> majority(in[p],in[q],in[r])
+#   ("choice", p, q, r)     -> in[q] if in[p] else in[r]
+#   ("tt3", p, q, r, table) -> arbitrary 3-var truth table (table in 1..254)
+
 
 def _bit(x: int, p: int) -> int:
     return (x >> (7 - p)) & 1
@@ -40,78 +57,125 @@ def _pack(bits: list[int]) -> int:
     return out
 
 
-def _pair_apply(op: str, a: int, b: int) -> Callable[[int], int]:
-    base = op.split("-")[0]
-    neg = op.endswith("-NOT")
+def _eval_column(col: tuple, x: int) -> int:
+    kind = col[0]
+    if kind == "const":
+        return col[1]
+    if kind == "route":
+        _, p, neg = col
+        b = _bit(x, p)
+        return 1 - b if neg else b
+    if kind == "pair":
+        _, op, p, q = col
+        u, v = _bit(x, p), _bit(x, q)
+        if op.endswith("-NOT"):
+            v = 1 - v
+        base = op.split("-")[0]
+        if base == "AND":
+            return u & v
+        if base == "OR":
+            return u | v
+        return u ^ v
+    if kind == "maj":
+        _, p, q, r = col
+        return 1 if (_bit(x, p) + _bit(x, q) + _bit(x, r)) >= 2 else 0
+    if kind == "choice":
+        _, p, q, r = col
+        return _bit(x, q) if _bit(x, p) else _bit(x, r)
+    if kind == "tt3":
+        _, p, q, r, table = col
+        idx = (_bit(x, p) << 2) | (_bit(x, q) << 1) | _bit(x, r)
+        return (table >> idx) & 1
+    raise ValueError(f"unknown column kind: {kind}")
 
-    def apply(x: int) -> int:
-        bits = []
+
+def _rand_pair_column(rng: random.Random) -> tuple:
+    op = rng.choice(_PAIR_OPS)
+    p = rng.randint(0, 7)
+    q = rng.randint(0, 7)
+    while q == p:
+        q = rng.randint(0, 7)
+    return ("pair", op, p, q)
+
+
+def _rand_route_column(rng: random.Random) -> tuple:
+    return ("route", rng.randint(0, 7), rng.random() < 0.3)
+
+
+def _rand_three_column(rng: random.Random) -> tuple:
+    kind = rng.choices(("choice", "maj", "tt3"), weights=(0.45, 0.20, 0.35))[0]
+    p, q, r = rng.sample(range(8), 3)
+    if kind == "maj":
+        return ("maj", p, q, r)
+    if kind == "choice":
+        return ("choice", p, q, r)
+    return ("tt3", p, q, r, rng.randint(1, 254))  # exclude const 0/255
+
+
+def _build_columns(rng: random.Random, profile: str) -> list[tuple]:
+    cols: list[tuple] = []
+    if profile == "pairwise":
+        # Heterogeneous: each bit an independent boolean of arbitrary operands,
+        # mostly 2-input with a sprinkle of identity-routing / const columns.
+        for _ in range(8):
+            roll = rng.random()
+            if roll < 0.12:
+                cols.append(_rand_route_column(rng))
+            elif roll < 0.20:
+                cols.append(("const", rng.randint(0, 1)))
+            else:
+                cols.append(_rand_pair_column(rng))
+    elif profile == "rot":
+        glob_neg = rng.random() < 0.3
+        if rng.random() < 0.90:  # coherent rotation (the routing bulk)
+            k = rng.randint(1, 7)
+            cols = [("route", (j + k) % 8, glob_neg) for j in range(8)]
+        else:  # arbitrary permutation (the rare routing tail)
+            perm = list(range(8))
+            rng.shuffle(perm)
+            cols = [("route", perm[j], glob_neg) for j in range(8)]
+    else:  # complex: >=1 genuine 3-input column, the rest 2-input / routing
+        three = set(rng.sample(range(8), rng.randint(1, 4)))
         for j in range(8):
-            u = _bit(x, (a + j) % 8)
-            v = _bit(x, (b + j) % 8)
-            if neg:
-                v = 1 - v
-            if base == "AND":
-                r = u & v
-            elif base == "OR":
-                r = u | v
-            else:  # XOR
-                r = u ^ v
-            bits.append(r)
-        return _pack(bits)
-
-    return apply
+            if j in three:
+                cols.append(_rand_three_column(rng))
+            elif rng.random() < 0.15:
+                cols.append(_rand_route_column(rng))
+            else:
+                cols.append(_rand_pair_column(rng))
+    return cols
 
 
-def _rot_apply(k: int, inv: bool) -> Callable[[int], int]:
-    def apply(x: int) -> int:
-        bits = [_bit(x, (j + k) % 8) for j in range(8)]
-        if inv:
-            bits = [1 - b for b in bits]
-        return _pack(bits)
-
-    return apply
+def _col_sig(col: tuple) -> str:
+    return ",".join(str(x) for x in col)
 
 
-def _complex_apply(kind: str, a: int, b: int, c: int) -> Callable[[int], int]:
-    def apply(x: int) -> int:
-        bits = []
-        for j in range(8):
-            p = _bit(x, (a + j) % 8)
-            q = _bit(x, (b + j) % 8)
-            s = _bit(x, (c + j) % 8)
-            if kind == "MAJ":
-                r = 1 if (p + q + s) >= 2 else 0
-            else:  # CHOICE: p selects q else s
-                r = q if p else s
-            bits.append(r)
-        return _pack(bits)
+def _profile_and_columns(seed: int) -> tuple[str, list[tuple]]:
+    rng = random.Random(seed)
+    roll = rng.random()
+    profile = "pairwise" if roll < 0.65 else ("rot" if roll < 0.85 else "complex")
+    return profile, _build_columns(rng, profile)
 
-    return apply
+
+def columns(seed: int) -> list[tuple]:
+    """The 8 per-output-bit column rules for *seed* (for tests/breakdowns)."""
+    return _profile_and_columns(seed)[1]
 
 
 def build_rule(seed: int) -> tuple[str, Callable[[int], int]]:
     """Return (canonical_signature, apply) for the rule selected by *seed*.
 
-    Family weights match the real distribution: ~65% pairwise, ~20% rotation,
-    ~15% complex (3-input majority/choice).
+    Family weights match the real distribution: ~65% pairwise, ~20% routing,
+    ~15% complex. Each output bit is an INDEPENDENT function of arbitrary input
+    bits (per-column heterogeneity), matching measured real micro-structure.
     """
-    rng = random.Random(seed)
-    roll = rng.random()
-    if roll < 0.65:
-        op = rng.choice(_PAIR_OPS)
-        a = rng.randint(0, 7)
-        b = (a + rng.randint(1, 7)) % 8  # b != a
-        return f"pairwise:{op},a={a},b={b}", _pair_apply(op, a, b)
-    if roll < 0.85:
-        k = rng.randint(1, 7)
-        inv = rng.random() < 0.3
-        return f"rot:k={k},inv={int(inv)}", _rot_apply(k, inv)
-    kind = rng.choice(("MAJ", "CHOICE"))
-    a = rng.randint(0, 7)
-    b = (a + rng.randint(1, 7)) % 8
-    c = (a + rng.randint(1, 7)) % 8
-    return f"complex:{kind},a={a},b={b},c={c}", _complex_apply(kind, a, b, c)
+    profile, cols = _profile_and_columns(seed)
+    signature = f"{profile}:" + ";".join(_col_sig(c) for c in cols)
+
+    def apply(x: int) -> int:
+        return _pack([_eval_column(c, x) for c in cols])
+
+    return signature, apply
 
 
 def rule_signature(seed: int) -> str:

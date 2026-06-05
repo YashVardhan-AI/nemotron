@@ -236,8 +236,12 @@ def generate_cipher(seed, difficulty):
 
 # --- bit_manipulation: rules from the REAL grammar (see analysis) ------------
 # Real train distribution (1,602 problems): ~65% pairwise 2-input boolean,
-# ~20% rotation/shift, ~15% complex 3-input (majority/choice). affine/xor-mask/
-# permutation are ~0% of real data, so we do NOT generate them.
+# ~20% routing (rotation, rarely an arbitrary permutation), ~15% complex 3-input
+# (majority / choice / arbitrary truth table). affine/xor-mask are ~0% of real.
+# CRUCIAL: real rules are HETEROGENEOUS across the 8 output bits (42.6% mix >=2
+# ops, 48.2% vary operand offset by column), so each output bit is an INDEPENDENT
+# function of arbitrary input bits — NOT one global op at one global offset.
+# Logic is kept identical to val/generators/bit_manipulation.py.
 _BIT_HEADER = (
     "In Alice's Wonderland, a secret bit manipulation rule transforms 8-bit "
     "binary numbers. The transformation involves operations like bit shifts, "
@@ -257,68 +261,107 @@ def _pack(bits):
     return out
 
 
+def _bit_eval_column(col, x):
+    kind = col[0]
+    if kind == "const":
+        return col[1]
+    if kind == "route":
+        _, p, neg = col
+        b = _bitval(x, p)
+        return 1 - b if neg else b
+    if kind == "pair":
+        _, op, p, q = col
+        u, v = _bitval(x, p), _bitval(x, q)
+        if op.endswith("-NOT"):
+            v = 1 - v
+        base = op.split("-")[0]
+        if base == "AND":
+            return u & v
+        if base == "OR":
+            return u | v
+        return u ^ v
+    if kind == "maj":
+        _, p, q, r = col
+        return 1 if (_bitval(x, p) + _bitval(x, q) + _bitval(x, r)) >= 2 else 0
+    if kind == "choice":
+        _, p, q, r = col
+        return _bitval(x, q) if _bitval(x, p) else _bitval(x, r)
+    # tt3: arbitrary 3-var truth table
+    _, p, q, r, table = col
+    idx = (_bitval(x, p) << 2) | (_bitval(x, q) << 1) | _bitval(x, r)
+    return (table >> idx) & 1
+
+
+def _bit_rand_pair_column(rng):
+    op = rng.choice(_BIT_PAIR_OPS)
+    p = rng.randint(0, 7)
+    q = rng.randint(0, 7)
+    while q == p:
+        q = rng.randint(0, 7)
+    return ("pair", op, p, q)
+
+
+def _bit_rand_route_column(rng):
+    return ("route", rng.randint(0, 7), rng.random() < 0.3)
+
+
+def _bit_rand_three_column(rng):
+    kind = rng.choices(("choice", "maj", "tt3"), weights=(0.45, 0.20, 0.35))[0]
+    p, q, r = rng.sample(range(8), 3)
+    if kind == "maj":
+        return ("maj", p, q, r)
+    if kind == "choice":
+        return ("choice", p, q, r)
+    return ("tt3", p, q, r, rng.randint(1, 254))
+
+
+def _bit_build_columns(rng, profile):
+    cols = []
+    if profile == "pairwise":
+        for _ in range(8):
+            roll = rng.random()
+            if roll < 0.12:
+                cols.append(_bit_rand_route_column(rng))
+            elif roll < 0.20:
+                cols.append(("const", rng.randint(0, 1)))
+            else:
+                cols.append(_bit_rand_pair_column(rng))
+    elif profile == "rot":
+        glob_neg = rng.random() < 0.3
+        if rng.random() < 0.90:
+            k = rng.randint(1, 7)
+            cols = [("route", (j + k) % 8, glob_neg) for j in range(8)]
+        else:
+            perm = list(range(8))
+            rng.shuffle(perm)
+            cols = [("route", perm[j], glob_neg) for j in range(8)]
+    else:  # complex
+        three = set(rng.sample(range(8), rng.randint(1, 4)))
+        for j in range(8):
+            if j in three:
+                cols.append(_bit_rand_three_column(rng))
+            elif rng.random() < 0.15:
+                cols.append(_bit_rand_route_column(rng))
+            else:
+                cols.append(_bit_rand_pair_column(rng))
+    return cols
+
+
 def build_bit_rule(seed):
     """Return (family, apply) for the rule selected by *seed*.
 
-    family is one of 'pairwise' / 'rot' / 'complex'; apply(x:int)->int.
+    family is one of 'pairwise' / 'rot' / 'complex'; apply(x:int)->int. Each
+    output bit is an INDEPENDENT function of arbitrary input bits.
     """
     rng = random.Random(seed)
     roll = rng.random()
-    if roll < 0.65:  # pairwise 2-input boolean (dominant real family)
-        op = rng.choice(_BIT_PAIR_OPS)
-        a = rng.randint(0, 7)
-        b = (a + rng.randint(1, 7)) % 8
-        base = op.split("-")[0]
-        neg = op.endswith("-NOT")
-
-        def apply(x):
-            bits = []
-            for j in range(8):
-                u = _bitval(x, (a + j) % 8)
-                v = _bitval(x, (b + j) % 8)
-                if neg:
-                    v = 1 - v
-                if base == "AND":
-                    r = u & v
-                elif base == "OR":
-                    r = u | v
-                else:
-                    r = u ^ v
-                bits.append(r)
-            return _pack(bits)
-
-        return "pairwise", apply
-    if roll < 0.85:  # rotation / shift (+ optional complement)
-        k = rng.randint(1, 7)
-        inv = rng.random() < 0.3
-
-        def apply(x):
-            bits = [_bitval(x, (j + k) % 8) for j in range(8)]
-            if inv:
-                bits = [1 - b for b in bits]
-            return _pack(bits)
-
-        return "rot", apply
-    # complex 3-input majority / choice (the hard tail; >2 inputs per bit)
-    kind = rng.choice(("MAJ", "CHOICE"))
-    a = rng.randint(0, 7)
-    b = (a + rng.randint(1, 7)) % 8
-    c = (a + rng.randint(1, 7)) % 8
+    profile = "pairwise" if roll < 0.65 else ("rot" if roll < 0.85 else "complex")
+    cols = _bit_build_columns(rng, profile)
 
     def apply(x):
-        bits = []
-        for j in range(8):
-            p = _bitval(x, (a + j) % 8)
-            q = _bitval(x, (b + j) % 8)
-            s = _bitval(x, (c + j) % 8)
-            if kind == "MAJ":
-                r = 1 if (p + q + s) >= 2 else 0
-            else:
-                r = q if p else s
-            bits.append(r)
-        return _pack(bits)
+        return _pack([_bit_eval_column(c, x) for c in cols])
 
-    return "complex", apply
+    return profile, apply
 
 
 def _bit_distinct_inputs(seed, count):

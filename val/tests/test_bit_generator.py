@@ -3,6 +3,7 @@ import pytest
 from val.generators import GENERATORS
 from val.generators.bit_manipulation import (
     build_rule,
+    columns,
     generate,
     rule_family,
     rule_signature,
@@ -78,10 +79,76 @@ def test_rule_families_match_real_grammar():
     assert counts["pairwise"] / len(fams) > 0.5
 
 
-def test_complex_family_uses_three_inputs():
-    # Find a 'complex' (majority/choice) rule and confirm it's a real 3-input
-    # function: changing a third input bit can change the output.
-    seed = next(s for s in range(400) if rule_family(s) == "complex")
-    _sig, apply = build_rule(seed)
-    outs = {apply(x) for x in range(256)}
-    assert len(outs) > 1  # non-degenerate transform
+# --- recalibration properties (per-column heterogeneity, matching real) -------
+
+
+def _pair_ops_in(cols):
+    return [c[1] for c in cols if c[0] == "pair"]
+
+
+def _pair_operands_in(cols):
+    return [(c[2], c[3]) for c in cols if c[0] == "pair"]
+
+
+def test_pairwise_problems_mix_multiple_ops():
+    # Real: 42.6% of problems mix >=2 distinct binary ops across the 8 bits.
+    # The recalibrated generator must clear that (draws ops independently/column).
+    seeds = [s for s in range(600) if rule_family(s) == "pairwise"]
+    mixed = sum(1 for s in seeds if len(set(_pair_ops_in(columns(s)))) >= 2)
+    assert mixed / len(seeds) > 0.4
+
+
+def test_pairwise_operands_vary_by_column():
+    # Real: 48.2% have operand offsets that vary by column (not one global shift).
+    seeds = [s for s in range(600) if rule_family(s) == "pairwise"]
+    varied = sum(1 for s in seeds if len(set(_pair_operands_in(columns(s)))) >= 2)
+    assert varied / len(seeds) > 0.4
+
+
+def test_complex_problems_have_a_three_input_column():
+    seeds = [s for s in range(600) if rule_family(s) == "complex"]
+    assert seeds, "expected some complex-family seeds in range"
+    for s in seeds:
+        assert any(c[0] in ("maj", "choice", "tt3") for c in columns(s))
+
+
+def test_complex_family_includes_arbitrary_truth_tables():
+    # The complex tail must include arbitrary 3-var truth tables (TT3), not only
+    # the named MAJ/CHOICE ops — real data has both.
+    seeds = [s for s in range(600) if rule_family(s) == "complex"]
+    assert any(any(c[0] == "tt3" for c in columns(s)) for s in seeds)
+
+
+def test_routing_includes_arbitrary_permutation():
+    # The routing family is mostly constant-k rotation, but ~10% are arbitrary
+    # permutations (matching the 2/20 observed in real routing problems).
+    rot_seeds = [s for s in range(800) if rule_family(s) == "rot"]
+
+    def is_rotation(cols):
+        sources = [c[1] for c in cols]  # all "route" columns
+        diffs = {(sources[j] - j) % 8 for j in range(8)}
+        return len(diffs) == 1  # constant offset => rotation
+
+    assert any(not is_rotation(columns(s)) for s in rot_seeds)
+
+
+def test_three_input_columns_genuinely_use_three_inputs():
+    # A complex column's output must be able to change when only the THIRD
+    # operand bit flips — i.e. it really depends on 3 inputs, not 2.
+    from val.generators.bit_manipulation import _eval_column
+
+    seed = next(
+        s for s in range(600) if any(c[0] in ("maj", "choice") for c in columns(s))
+    )
+    col = next(c for c in columns(seed) if c[0] in ("maj", "choice"))
+    _kind, p, q, r = col
+    # Build two inputs differing only at bit r; find a case where output differs.
+    differs = False
+    for x in range(256):
+        if (x >> (7 - r)) & 1:
+            continue
+        y = x | (1 << (7 - r))
+        if _eval_column(col, x) != _eval_column(col, y):
+            differs = True
+            break
+    assert differs

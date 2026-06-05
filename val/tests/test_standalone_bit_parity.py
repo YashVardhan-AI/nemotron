@@ -1,0 +1,36 @@
+"""Guard: the inline bit generator in val/kaggle_newrule_eval_standalone.py must
+stay logically identical to val/generators/bit_manipulation.py.
+
+The standalone is a self-contained Kaggle copy (no repo imports), so the two can
+drift silently. This execs the standalone's pre-vLLM cells and checks that, for
+the same seeds, generate_bit produces the same prompt + answer as the module's
+generate. If they diverge, local val numbers won't predict the Kaggle run.
+"""
+
+from pathlib import Path
+
+from val.generators.bit_manipulation import generate as module_generate
+
+_STANDALONE = Path(__file__).resolve().parents[1] / "kaggle_newrule_eval_standalone.py"
+
+
+def _load_standalone_namespace():
+    src = _STANDALONE.read_text(encoding="utf-8")
+    # Everything before "Cell 5" is pure stdlib; Cell 5 imports vllm (GPU-only).
+    marker = "# %% ── Cell 5"
+    prefix = src.split(marker)[0]
+    ns: dict = {}
+    exec(compile(prefix, str(_STANDALONE), "exec"), ns)  # noqa: S102
+    return ns
+
+
+def test_standalone_bit_matches_module():
+    ns = _load_standalone_namespace()
+    generate_bit = ns["generate_bit"]
+    for seed in range(80):
+        a = module_generate(seed, difficulty=8)
+        b = generate_bit(seed, 8)
+        assert a.prompt == b.prompt, f"prompt mismatch at seed {seed}"
+        assert a.answer == b.answer, f"answer mismatch at seed {seed}"
+        # family tag (module id suffix vs standalone meta) must also agree
+        assert a.id.split("-")[2] == b.meta, f"family mismatch at seed {seed}"
