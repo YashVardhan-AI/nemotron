@@ -67,7 +67,7 @@ CRYPT_REPLACE_REAL = True
 # These ADD to the real bit rows (which cover the easy 2-input/rotation families).
 # Seeds start high (disjoint from val AND cryptarithm seeds); any val-reserved
 # rule_signature is skipped, so no validation rule can leak. Set BIT_N = 0 to off.
-BIT_N = 0
+BIT_N = 800
 BIT_DIFFICULTY = 8  # real bit gives 7-10 examples (avg ~8.6)
 BIT_SEED_OFFSET = 2_000_000  # disjoint from val (~0..few-k) and cryptarithm (1e6)
 # Forward-gen only the WEAK tier; skip pairwise/hom + rot the model already does.
@@ -87,7 +87,11 @@ DOWNSAMPLE_RATES = {"numeral": 0.4, "gravity": 0.6, "unit_conversion": 0.6}
 # duplicated cyclically (or subsampled) to hit its target. Sum = 7830 rows.
 # Set DUP_TARGETS = {} to disable rebalancing (one row per unique trace).
 DUP_TARGETS = {
-    "bit_manipulation": 1754,
+    # +BIT_N so the forward-gen weak-tier traces ADD on top of the real bit rows
+    # (the lever) rather than being truncated away by the rebalance cap. With
+    # BIT_N>0 the unique pool (real + forward-gen) is always < this target, so the
+    # cyclic-duplication branch keeps every unique trace -- no forward-gen dropped.
+    "bit_manipulation": 1754 + BIT_N,
     "cipher": 1656,
     "unit_conversion": 1070,
     "gravity": 1055,
