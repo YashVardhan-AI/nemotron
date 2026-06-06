@@ -111,6 +111,45 @@ DUP_TARGETS = {
     "equation_numeric_guess": 126,
 }
 
+# --- gradient-reweight A/B (REWEIGHT=1) ---------------------------------------
+# Hypothesis (4-agent audit 2026-06-06, memory training-recipe-unswept-levers):
+# the winning mixture pours ~41% of token-weighted gradient into bit_manipulation
+# (median 6722-token traces, CAPPED at 88.8%) and another ~41% into the saturated
+# cluster (gravity/numeral/unit_conversion/cipher, all ~100%). That is gradient
+# spent where accuracy cannot rise. This profile TRIMS the bit token-hog + the
+# saturated cluster and reallocates the freed capacity to the only categories
+# with arguable headroom (equation_numeric; cryptarithm held).
+#
+# HONEST CAVEAT: the unsaturated unique pool is already MAXED (no downsampling is
+# applied to bit/cipher/equation/cryptarithm -- every real trace is used), so
+# raising their targets adds COPIES (repetition), not new unique problems. The
+# well-justified half is the CUT (less waste on capped/saturated); the "more
+# equation" half is repetition with diminishing returns. Total kept ~= 7830 so
+# this is a clean MIXTURE A/B at matched 1-epoch step count, not a step-count
+# change. SAFE re: the measured neighbor-interference crashes -- it changes only
+# copy counts / downsample rates, introducing NO new trace shape.
+# Set REWEIGHT=1 (env) to enable; default OFF preserves the winning recipe.
+REWEIGHT = os.environ.get("REWEIGHT", "0") != "0"
+REWEIGHT_DOWNSAMPLE_RATES = {"numeral": 0.3, "gravity": 0.45, "unit_conversion": 0.45}
+REWEIGHT_DUP_TARGETS = {
+    "bit_manipulation": 1300 + BIT_N,  # cut the capped 41%-gradient token-hog
+    "cipher": 1656,  # neighbor canary -- hold stable
+    "unit_conversion": 800,  # saturated -> trim
+    "gravity": 800,  # saturated -> trim
+    "numeral": 500,  # saturated -> trim
+    "equation_numeric_deduce": 1550,  # headroom cat -> more gradient (copies)
+    "equation_numeric_guess": 400,
+    "cryptarithm_deduce": 627,  # hold (SFT-dead; do not destabilize)
+    "cryptarithm_guess": 154,
+}
+if REWEIGHT:
+    DOWNSAMPLE_RATES = REWEIGHT_DOWNSAMPLE_RATES
+    DUP_TARGETS = REWEIGHT_DUP_TARGETS
+    print(
+        "REWEIGHT=1: trimming bit + saturated, reallocating to equation "
+        f"(targets sum {sum(REWEIGHT_DUP_TARGETS.values())})"
+    )
+
 # Build speed: augmentation categories are NOT reasoning categories, so the
 # reasoning-only train filter (train_sft.filter_training_examples) discards them
 # anyway -- tokenizing ~8.5k of them just to throw them away ~doubles the build
