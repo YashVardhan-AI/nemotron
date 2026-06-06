@@ -48,7 +48,9 @@ TOKEN_LIMIT = 8192
 # any val-reserved rule_signature is skipped, so no validation rule can leak into
 # training. Phase 6 sweeps CRYPT_N (size-matched ~600 vs scale 3-8k) and
 # CRYPT_STYLE (deduce | propagate | mixed). Set CRYPT_N = 0 to disable.
-CRYPT_N = 627
+# NEGATIVE RESULT (measured): induct cryptarithm crashed neighbors (cipher/equation)
+# and overall 0.86 -> 0.83. Disabled (CRYPT_N=0 keeps the real cryptarithm rows).
+CRYPT_N = 0
 CRYPT_STYLE = "induct"
 CRYPT_DIFFICULTY = 4
 CRYPT_SEED_OFFSET = 1_000_000  # disjoint from val seeds (0..few-thousand)
@@ -67,7 +69,14 @@ CRYPT_REPLACE_REAL = True
 # These ADD to the real bit rows (which cover the easy 2-input/rotation families).
 # Seeds start high (disjoint from val AND cryptarithm seeds); any val-reserved
 # rule_signature is skipped, so no validation rule can leak. Set BIT_N = 0 to off.
-BIT_N = 800
+# NEGATIVE RESULT (measured): BIT_N=800 forward-gen per-bit-assertion traces
+# CRASHED bit (bit_retention 88.8% -> 22.0%) by overwriting the global-deduction
+# strategy that solved the hom tier (pairwise/hom 90% -> 9%). het tier did NOT
+# improve. The het/complex tiers are information-underdetermined (8 examples admit
+# multiple rules); the assertion trace cannot teach an unlearnable deduction and
+# erases the working hom strategy. Do NOT re-enable without a fundamentally
+# different trace shape. See memory eval-harden-bit-lever-plan.
+BIT_N = 0
 BIT_DIFFICULTY = 8  # real bit gives 7-10 examples (avg ~8.6)
 BIT_SEED_OFFSET = 2_000_000  # disjoint from val (~0..few-k) and cryptarithm (1e6)
 # Forward-gen only the WEAK tier; skip pairwise/hom + rot the model already does.
