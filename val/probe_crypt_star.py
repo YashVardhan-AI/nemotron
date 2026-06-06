@@ -61,16 +61,19 @@ PROBE_SEED_OFFSET = 5_000_000
 
 
 class ProbeInstance:
-    """One uniquely-solvable cryptarithm instance + its op family + brace flag."""
+    """One uniquely-solvable cryptarithm instance + its op family + grade flag."""
 
-    __slots__ = ("seed", "family", "prompt", "answer", "has_brace")
+    __slots__ = ("seed", "family", "prompt", "answer", "ungradeable")
 
     def __init__(self, seed: int, family: str, prompt: str, answer: str):
         self.seed = seed
         self.family = family
         self.prompt = prompt
         self.answer = answer
-        self.has_brace = "}" in answer or "{" in answer
+        # The grader regex `\boxed\{([^}]*)` truncates at the FIRST `}`, so ONLY
+        # a `}` in the answer makes it ungradeable (a `{` extracts fine). This is
+        # the leaderboard-unwinnable set even with perfect reasoning.
+        self.ungradeable = "}" in answer
 
 
 def build_probe_set(
@@ -188,9 +191,9 @@ def main() -> None:
         f"Probe set: {n_arith} arith + {n_concat} concat instances, "
         f"K={args.n} @ temp={args.temperature} top_p={args.top_p}"
     )
-    brace_arith = sum(i.family == "arith" and i.has_brace for i in instances)
+    ung_arith = sum(i.family == "arith" and i.ungradeable for i in instances)
     print(
-        f"  (of arith instances, {brace_arith} have a brace in the answer -> "
+        f"  (of arith instances, {ung_arith} contain `}}` in the answer -> "
         "grader-ungradeable even if reasoned correctly)"
     )
 
@@ -231,7 +234,7 @@ def main() -> None:
                         "prompt": inst.prompt,
                         "completion": text,
                         "answer": inst.answer,
-                        "gradeable": not inst.has_brace,
+                        "gradeable": not inst.ungradeable,
                     }
                 )
             if ok_b:
