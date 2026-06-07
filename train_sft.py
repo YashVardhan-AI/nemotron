@@ -98,7 +98,7 @@ class Cfg:
         default_factory=lambda: datetime.now().strftime("%m-%d-%H-%M")
     )
     model_name: str = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-    batch_size: int = 64
+    batch_size: int = 32
     num_epochs: int = 1
     lora_rank: int = 32  # 32
     max_length: int = 8192
