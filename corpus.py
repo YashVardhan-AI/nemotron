@@ -111,43 +111,47 @@ DUP_TARGETS = {
     "equation_numeric_guess": 126,
 }
 
-# --- gradient-reweight A/B (REWEIGHT=1) ---------------------------------------
-# Hypothesis (4-agent audit 2026-06-06, memory training-recipe-unswept-levers):
-# the winning mixture pours ~41% of token-weighted gradient into bit_manipulation
-# (median 6722-token traces, CAPPED at 88.8%) and another ~41% into the saturated
-# cluster (gravity/numeral/unit_conversion/cipher, all ~100%). That is gradient
-# spent where accuracy cannot rise. This profile TRIMS the bit token-hog + the
-# saturated cluster and reallocates the freed capacity to the only categories
-# with arguable headroom (equation_numeric; cryptarithm held).
+# --- increase-hard-categories A/B (BOOST_HARD=1) -----------------------------
+# User experiment 2026-06-07: INCREASE the number of samples on the HARD
+# categories (bit_manipulation, cryptarithm, equation_numeric) while keeping the
+# SATURATED categories (gravity/numeral/unit_conversion/cipher) exactly as the
+# winning recipe has them. Same CoT throughout -- this only raises DUP_TARGETS,
+# adding more COPIES of the existing real traces; it introduces NO new trace
+# shape, so it is SAFE re: the measured neighbor-interference crashes
+# ([[induct-sft-negative-result]]). Total rises ~7830 -> ~9960.
 #
-# HONEST CAVEAT: the unsaturated unique pool is already MAXED (no downsampling is
-# applied to bit/cipher/equation/cryptarithm -- every real trace is used), so
-# raising their targets adds COPIES (repetition), not new unique problems. The
-# well-justified half is the CUT (less waste on capped/saturated); the "more
-# equation" half is repetition with diminishing returns. Total kept ~= 7830 so
-# this is a clean MIXTURE A/B at matched 1-epoch step count, not a step-count
-# change. SAFE re: the measured neighbor-interference crashes -- it changes only
-# copy counts / downsample rates, introducing NO new trace shape.
-# Set REWEIGHT=1 (env) to enable; default OFF preserves the winning recipe.
-REWEIGHT = os.environ.get("REWEIGHT", "0") != "0"
-REWEIGHT_DOWNSAMPLE_RATES = {"numeral": 0.3, "gravity": 0.45, "unit_conversion": 0.45}
-REWEIGHT_DUP_TARGETS = {
-    "bit_manipulation": 1300 + BIT_N,  # cut the capped 41%-gradient token-hog
-    "cipher": 1656,  # neighbor canary -- hold stable
-    "unit_conversion": 800,  # saturated -> trim
-    "gravity": 800,  # saturated -> trim
-    "numeral": 500,  # saturated -> trim
-    "equation_numeric_deduce": 1550,  # headroom cat -> more gradient (copies)
-    "equation_numeric_guess": 400,
-    "cryptarithm_deduce": 627,  # hold (SFT-dead; do not destabilize)
-    "cryptarithm_guess": 154,
+# HONEST CAVEAT (memory training-recipe-unswept-levers): the hard-category unique
+# pools are already fully used (no downsampling on them), so "more samples" =
+# more REPETITION of the same problems, not new unique data (no same-CoT
+# generator exists for these). At 1 epoch, duplicating a category to ~2x means
+# the model sees each of its problems ~2x -- i.e. this is effectively "train the
+# hard categories ~2x longer" while the saturated ones stay 1x. Expect a small
+# effect at best (bit het + cryptarithm are information/structure capped; the
+# extra reps cannot beat those ceilings), but it is a cheap, safe arm and a
+# measured null pins the ceiling. Tune the targets below freely.
+# Set BOOST_HARD=1 (env) to enable; default OFF preserves the winning recipe.
+BOOST_HARD = os.environ.get("BOOST_HARD", "0") != "0"
+BOOST_HARD_DUP_TARGETS = {
+    # HARD categories -> more copies (same CoT). bit is the token-hog (median
+    # 6722 tok) so its bump is the costliest in train time + least likely to pay
+    # (het tier is info-capped) -- kept modest; raise/lower as you like.
+    "bit_manipulation": 2200 + BIT_N,
+    "equation_numeric_deduce": 1300,
+    "equation_numeric_guess": 300,
+    "cryptarithm_deduce": 1300,
+    "cryptarithm_guess": 350,
+    # SATURATED categories -> UNCHANGED (identical to the winning DUP_TARGETS).
+    "cipher": 1656,
+    "unit_conversion": 1070,
+    "gravity": 1055,
+    "numeral": 730,
 }
-if REWEIGHT:
-    DOWNSAMPLE_RATES = REWEIGHT_DOWNSAMPLE_RATES
-    DUP_TARGETS = REWEIGHT_DUP_TARGETS
+if BOOST_HARD:
+    # DOWNSAMPLE_RATES unchanged: saturated categories stay exactly as shipped.
+    DUP_TARGETS = BOOST_HARD_DUP_TARGETS
     print(
-        "REWEIGHT=1: trimming bit + saturated, reallocating to equation "
-        f"(targets sum {sum(REWEIGHT_DUP_TARGETS.values())})"
+        "BOOST_HARD=1: more samples on hard cats (bit/cryptarithm/equation), "
+        f"saturated held (targets sum {sum(BOOST_HARD_DUP_TARGETS.values())})"
     )
 
 # Build speed: augmentation categories are NOT reasoning categories, so the
