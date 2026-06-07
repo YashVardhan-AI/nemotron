@@ -887,3 +887,38 @@ set `CRYPT_STYLE="induct"` in corpus.py (keep `CRYPT_REPLACE_REAL=True`), `uv ru
 train filter to the 9 reasoning categories, `uv run python -m train_sft`, convert via
 `adapter converter.ipynb`, then re-measure cryptarithm_deduce on
 `val/kaggle_newrule_eval_standalone.py` (N=50, difficulty 4) vs the 6.0% frozen baseline.
+
+## OUTCOME 2026-06-05 — induct arm FAILED (measured); cryptarithm SFT lever SHELVED
+
+The `induct` arm was trained (train_sft Tinker, reasoning-only corpus, 627 distinct
+induct rows replacing concat) and evaluated. **Result = NET-NEGATIVE, do NOT ship or
+scale:**
+- cryptarithm_deduce: new-rule synthetic still **6%** (add/abs_diff/mul = **0%**; only
+  structural concat 10% / rev_concat 33%). Training-data accuracy **8.5% → 0.0%** (lost
+  even the concat ability).
+- **Collateral catastrophic interference** (training-data acc): cipher **97.5% → 52.5%**,
+  equation_numeric_deduce **87.5% → 27.1%**; overall **88.1% → 76.1%** (hidden-style
+  proxy 0.86 → 0.83). gravity/numeral/unit_conversion/bit untouched.
+- **Generation-inspected root cause = "structure not content"** (the [[cryptarithm-trace-research]]
+  risk, now empirical): the 30B model reproduces the induct FORMAT flawlessly but cannot
+  maintain the injective (all-different) digit map at greedy decode — every inspected
+  STATE block assigns a digit to ≥2 glyphs unnoticed, Step-1 operator checks are
+  confabulated (fake arithmetic "matches"), and one completion looped "forced ^ = 5
+  (consistent)" to the 7680-token limit without boxing. The honest column arithmetic it
+  DOES emit is correct → arithmetic is NOT the bottleneck; the injective-CSP search is.
+  This also explains why exactly cipher (injective substitution) + equation (arithmetic)
+  crashed: the trained "confident-but-inconsistent substitution+arithmetic" behavior
+  bled into those neighbors via high-loss × long-trace gradient interference.
+
+**Verdict:** dense-trace SFT (induct/deduce/propagate, any style or scale) cannot install
+the injective-CSP ability the model lacks — this whole sub-lever is DONE. Phases 6 (style
+bake-off) and the Arm-B scale-up are CANCELLED. Revert the submission corpus to the 0.86
+baseline (`CRYPT_N=0`).
+
+**Deferred to a FUTURE phase (user decision 2026-06-05 — not now):** the two paths with
+any remaining hope, both gated on a cheap STaR feasibility probe (sample the BASELINE
+adapter K≈64 @ temp 0.8 on easy arith instances; is the correct-sample rate > ~5-10%?):
+(1) **STaR / RFT** — fine-tune only on the model's OWN verifier-correct samples (executable
+by construction, model-native length → no structure-not-content gap, no interference);
+(2) **RL** with the `compare_answer` reward (super-plan #7/#9/#10). Current priority is
+**bit_manipulation complex 3-input** (super-plan P1 lever #1), not cryptarithm.
