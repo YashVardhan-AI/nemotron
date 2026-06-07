@@ -120,3 +120,12 @@ summary = run_probe(
     accepted_out=ACCEPTED_OUT,
     report_out=REPORT_OUT,
 )
+
+# Echo the machine-readable summary to the console too (the JSON file isn't
+# visible in the notebook) -- copy this block back for the GREEN/YELLOW/RED call.
+import json
+
+print("\n" + "=" * 60)
+print("crypt_star_probe summary (JSON)")
+print("=" * 60)
+print(json.dumps(summary, indent=2))
