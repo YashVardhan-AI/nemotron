@@ -163,33 +163,33 @@ def _pct(num: int, den: int) -> str:
     return f"{(100.0 * num / den) if den else 0.0:5.1f}%  ({num}/{den})"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="cryptarithm STaR feasibility probe")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--adapter", required=True)
-    parser.add_argument("--n", type=int, default=64, help="samples per instance (K)")
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--max-tokens", type=int, default=7680)
-    parser.add_argument("--n-arith", type=int, default=40)
-    parser.add_argument("--n-concat", type=int, default=20)
-    parser.add_argument("--difficulty", type=int, default=4)
-    parser.add_argument(
-        "--accepted-out",
-        default="crypt_star_accepted.jsonl",
-        help="JSONL of verifier-correct (prompt, completion, answer) STaR rows",
-    )
-    parser.add_argument(
-        "--report-out", default="crypt_star_probe.json", help="machine-readable summary"
-    )
-    args = parser.parse_args()
+def run_probe(
+    sampler: Callable[[list[str]], list[list[str]]],
+    *,
+    n: int,
+    temperature: float,
+    top_p: float,
+    n_arith: int,
+    n_concat: int,
+    difficulty: int,
+    accepted_out: str,
+    report_out: str,
+) -> dict:
+    """Build the probe set, draw K samples via `sampler`, grade, report.
 
-    instances = build_probe_set(args.n_arith, args.n_concat, args.difficulty)
-    n_arith = sum(i.family == "arith" for i in instances)
-    n_concat = sum(i.family == "concat" for i in instances)
+    `sampler(contents) -> list[list[str]]` draws n samples per prompt and returns
+    them aligned to the input. This is decoupled from HOW the samples are produced
+    so the same logic runs from the CLI (make_vllm_multisampler builds a fresh vLLM
+    engine) OR inside a notebook reusing an already-initialised `llm` (see
+    val/kaggle_crypt_star_standalone.py -- the path that dodges the Kaggle Blackwell
+    ptxas-permission crash, since the notebook's engine is already patched).
+    """
+    instances = build_probe_set(n_arith, n_concat, difficulty)
+    got_arith = sum(i.family == "arith" for i in instances)
+    got_concat = sum(i.family == "concat" for i in instances)
     print(
-        f"Probe set: {n_arith} arith + {n_concat} concat instances, "
-        f"K={args.n} @ temp={args.temperature} top_p={args.top_p}"
+        f"Probe set: {got_arith} arith + {got_concat} concat instances, "
+        f"K={n} @ temp={temperature} top_p={top_p}"
     )
     ung_arith = sum(i.family == "arith" and i.ungradeable for i in instances)
     print(
@@ -197,14 +197,6 @@ def main() -> None:
         "grader-ungradeable even if reasoned correctly)"
     )
 
-    sampler = make_vllm_multisampler(
-        args.model,
-        args.adapter,
-        n=args.n,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        max_tokens=args.max_tokens,
-    )
     contents = [inst.prompt + BOXED_INSTRUCTION for inst in instances]
     samples_per_instance = sampler(contents)
 
@@ -248,8 +240,8 @@ def main() -> None:
     for fam in ("arith", "concat"):
         s = stats[fam]
         print(f"[{fam}]  n={s['n']}")
-        print(f"  grader-strict pass@{args.n}: {_pct(s['pass_g'], s['n'])}")
-        print(f"  brace-aware   pass@{args.n}: {_pct(s['pass_b'], s['n'])}")
+        print(f"  grader-strict pass@{n}: {_pct(s['pass_g'], s['n'])}")
+        print(f"  brace-aware   pass@{n}: {_pct(s['pass_b'], s['n'])}")
         print(
             f"  accept rate (correct/total samples): {_pct(s['correct_samples'], s['tot'])}"
         )
@@ -268,26 +260,26 @@ def main() -> None:
         verdict = "RED -- model cannot do cryptarithm arith; STaR is dead too"
     print(f"\nVERDICT: {verdict}")
     print(
-        f"  arith grader-strict pass@{args.n} = {arith_pass_g:.1f}% | "
+        f"  arith grader-strict pass@{n} = {arith_pass_g:.1f}% | "
         f"brace-aware = {arith_pass_b:.1f}%"
     )
 
-    with open(args.accepted_out, "w", encoding="utf-8") as f:
+    with open(accepted_out, "w", encoding="utf-8") as f:
         for row in accepted_rows:
             json.dump(row, f)
             f.write("\n")
     gradeable = sum(r["gradeable"] for r in accepted_rows)
     print(
         f"\nWrote {len(accepted_rows)} accepted samples "
-        f"({gradeable} gradeable) -> {args.accepted_out}"
+        f"({gradeable} gradeable) -> {accepted_out}"
     )
 
     summary = {
         "config": {
-            "n": args.n,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "difficulty": args.difficulty,
+            "n": n,
+            "temperature": temperature,
+            "top_p": top_p,
+            "difficulty": difficulty,
         },
         "arith": stats["arith"],
         "concat": stats["concat"],
@@ -297,9 +289,52 @@ def main() -> None:
         "accepted_total": len(accepted_rows),
         "accepted_gradeable": gradeable,
     }
-    with open(args.report_out, "w", encoding="utf-8") as f:
+    with open(report_out, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    print(f"Wrote summary -> {args.report_out}")
+    print(f"Wrote summary -> {report_out}")
+    return summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="cryptarithm STaR feasibility probe")
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--adapter", required=True)
+    parser.add_argument("--n", type=int, default=64, help="samples per instance (K)")
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--max-tokens", type=int, default=7680)
+    parser.add_argument("--n-arith", type=int, default=40)
+    parser.add_argument("--n-concat", type=int, default=20)
+    parser.add_argument("--difficulty", type=int, default=4)
+    parser.add_argument(
+        "--accepted-out",
+        default="crypt_star_accepted.jsonl",
+        help="JSONL of verifier-correct (prompt, completion, answer) STaR rows",
+    )
+    parser.add_argument(
+        "--report-out", default="crypt_star_probe.json", help="machine-readable summary"
+    )
+    args = parser.parse_args()
+
+    sampler = make_vllm_multisampler(
+        args.model,
+        args.adapter,
+        n=args.n,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_tokens=args.max_tokens,
+    )
+    run_probe(
+        sampler,
+        n=args.n,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        n_arith=args.n_arith,
+        n_concat=args.n_concat,
+        difficulty=args.difficulty,
+        accepted_out=args.accepted_out,
+        report_out=args.report_out,
+    )
 
 
 if __name__ == "__main__":
