@@ -48,6 +48,19 @@ CIPHER_CANARY_N = 200
 # measuring a bit-lever gain; the seen-data self-eval is only n~33 for bit).
 LOAD_BIT_RETENTION = True
 BIT_RETENTION_N = 250
+# Seen-vs-fresh memorization-gap slice for the downsampled saturated cats
+# (gravity/numeral/unit). corpus.py only trains on ~40-60% of their real pool
+# (DOWNSAMPLE_RATES), so a CLEAN random held-out 'fresh' set exists -- unlike
+# bit/cipher/equation, whose real pools are 100% exhausted (no fresh to measure).
+# Membership = corpus.jsonl (the CURRENT adapter's training set), so this is only
+# valid when scoring the current-corpus adapter. gap = seen% - fresh%:
+#   ~0  -> the cat generalizes; the train/test delta is not memorization here and
+#          more (or more diverse) data won't move it (capability/info floor).
+#   >0  -> memorization; training on more of the held-out pool should recover pts.
+LOAD_SATURATED_GAP = True
+SATURATED_GAP_N = 150  # cap per side (seen / fresh) per category
+SATURATED_GAP_CATEGORIES = ("gravity", "numeral", "unit_conversion")
+CORPUS_INDEX_REL = "corpus.jsonl"
 
 
 # %% ── Cell 2: grading (verbatim from the real scoring path) ─────────────────
@@ -228,6 +241,74 @@ def load_bit_retention(n):
     return _load_real_sample("bit_manipulation", n, "bit_retention")
 
 
+def _corpus_trained_base_ids(root):
+    """Base problem_ids the CURRENT corpus trains on (corpus.jsonl, included only).
+
+    Distinct from trained_base_ids in load_real_holdout (which uses the ORIGINAL
+    04-08-16-14 snapshot). The current adapter trains on corpus.jsonl, so the
+    seen/fresh split for the saturated gap must use this membership.
+    """
+    trained = set()
+    with open(os.path.join(root, CORPUS_INDEX_REL)) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            e = json.loads(line)
+            if e.get("included", True):
+                trained.add(_DUP_SUFFIX.sub("", e["problem_id"]))
+    return trained
+
+
+def load_saturated_gap(n, categories):
+    """Seen-vs-fresh slice for the downsampled saturated cats (the memorization gap).
+
+    For each category: real problems IN the current corpus (seen) vs NOT in it
+    (fresh), capped at n per side, tagged '<cat>_seen' / '<cat>_fresh'. The holdout
+    is a clean random downsample (corpus.py DOWNSAMPLE_RATES), NOT a solver-failure
+    floor -- so seen vs fresh is an apples-to-apples generalization read. See the
+    Cell 1 config comment for how to read the gap.
+    """
+    root = _find_data_root()
+    trained = _corpus_trained_base_ids(root)
+
+    by_cat_ids = {c: [] for c in categories}
+    with open(os.path.join(root, "problems.jsonl")) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            e = json.loads(line)
+            if e["category"] in by_cat_ids:
+                by_cat_ids[e["category"]].append(e["id"])
+
+    problems = []
+    for cat in categories:
+        seen = fresh = 0
+        for pid in sorted(by_cat_ids[cat]):
+            if seen >= n and fresh >= n:
+                break
+            is_trained = _DUP_SUFFIX.sub("", pid) in trained
+            if (is_trained and seen >= n) or (not is_trained and fresh >= n):
+                continue
+            d = json.loads(open(os.path.join(root, "problems", f"{pid}.jsonl")).read())
+            problems.append(
+                RealProblem(
+                    id=pid,
+                    category=f"{cat}_seen" if is_trained else f"{cat}_fresh",
+                    prompt=str(d["prompt"]),
+                    answer=str(d["answer"]),
+                    n_examples=len(d.get("examples", [])),
+                    clean=False,
+                )
+            )
+            if is_trained:
+                seen += 1
+            else:
+                fresh += 1
+    return problems
+
+
 # %% ── Cell 4: scoring + reporting ───────────────────────────────────────────
 from collections import defaultdict
 
@@ -274,12 +355,39 @@ def format_table(report):
         ov = report[cat]["overall"]
         if cat in ("cipher_canary", "bit_retention"):
             tag = "real"  # in-distribution retention (leaderboard proxy), not a floor
+        elif cat.endswith("_seen"):
+            tag = "seen"
+        elif cat.endswith("_fresh"):
+            tag = "fresh"
         else:
             tag = "clean" if report[cat]["clean"] else "floor"
         lines.append(
             f"{cat:<24} {tag:<6} {ov['n']:>5} "
             f"{ov['accuracy'] * 100:>8.1f} {ov['accuracy_strict'] * 100:>11.1f}"
         )
+    return "\n".join(lines)
+
+
+def format_gap_summary(report):
+    """Print seen% vs fresh% and the gap (percentage points) per saturated cat."""
+    bases = sorted(
+        {c[:-5] for c in report if c.endswith("_seen")}
+        & {c[:-6] for c in report if c.endswith("_fresh")}
+    )
+    if not bases:
+        return ""
+    lines = [
+        "",
+        "seen-vs-fresh memorization gap (current-corpus membership):",
+        f"{'category':<20}{'seen%':>8}{'fresh%':>8}{'gap_pp':>8}{'n s/f':>12}",
+        "-" * 56,
+    ]
+    for b in bases:
+        s = report[f"{b}_seen"]["overall"]
+        fr = report[f"{b}_fresh"]["overall"]
+        sg, fg = s["accuracy"] * 100, fr["accuracy"] * 100
+        ns_nf = f"{s['n']}/{fr['n']}"
+        lines.append(f"{b:<20}{sg:>8.1f}{fg:>8.1f}{sg - fg:>8.1f}{ns_nf:>12}")
     return "\n".join(lines)
 
 
@@ -318,6 +426,8 @@ if LOAD_CIPHER_CANARY:
     problems += load_cipher_canary(CIPHER_CANARY_N)
 if LOAD_BIT_RETENTION:
     problems += load_bit_retention(BIT_RETENTION_N)
+if LOAD_SATURATED_GAP:
+    problems += load_saturated_gap(SATURATED_GAP_N, SATURATED_GAP_CATEGORIES)
 print(
     f"holdout problems: {len(problems)} across {len({p.category for p in problems})} categories"
 )
@@ -365,6 +475,9 @@ print("REAL snapshot-complement holdout (unseen real problems)")
 print("clean = unbiased baseline; floor = pessimistic (solver-failure bias)")
 print("=" * 64)
 print(format_table(report))
+gap = format_gap_summary(report)
+if gap:
+    print(gap)
 
 with open(OUT_JSON, "w") as f:
     json.dump(report, f, indent=2)
