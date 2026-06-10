@@ -18,7 +18,7 @@
 # Sampler weights of your run (from training/sft/<ts>/checkpoints.jsonl ->
 # "sampler_path"). NOT weights/final (that is training state for resuming).
 TINKER_MODEL_PATH = (
-    "tinker://ab25e405-af9e-5d12-a7e5-2e26c242ec2f:train:0/sampler_weights/final"
+    "tinker://32dec6f7-9e5b-5456-885b-748442ce5598:train:0/sampler_weights/final"
 )
 # build_lora_adapter needs the base model's config + state keys/shapes.
 # On Kaggle, set this to your ATTACHED base-model dir to avoid a ~60GB download,
