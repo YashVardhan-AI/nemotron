@@ -62,3 +62,40 @@ def load_symbolic_reasoning(style: str = "assert") -> dict[str, str]:
         if text is not None:
             out[row["id"]] = text
     return out
+
+
+_HONEST_DIR = Path(__file__).resolve().parent.parent / "runs" / "crypt_symbolic"
+
+
+def load_honest_symbolic_reasoning(style: str = "derive_search") -> dict[str, str]:
+    """Return {train_id: reasoning_text} for HONEST cryptarithm traces — rendered
+    from the PURE-INFERENCE solve (no gold hint), keeping only the ~62% of real
+    problems the solver recovers unconditioned.
+
+    This is the fix for the gold-conditioned defect: `load_symbolic_reasoning`
+    rendered every trace from a program reverse-fit to the known answer (44%
+    little_endian + exotic ops), which does not generalize (all three trained
+    arms -> ~0% at test). Cache is produced by `val/gen_crypt_honest.py`; returns
+    {} if it is missing (so corpus build fails loudly via the empty-dict print)."""
+    cache = _HONEST_DIR / f"honest_real_{style}.jsonl"
+    out: dict[str, str] = {}
+    if not cache.exists():
+        return out
+    with open(cache, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                obj = json.loads(line)
+                out[obj["id"]] = obj["reasoning"]
+    return out
+
+
+def load_crypt_drop_ids() -> set[str]:
+    """Ids of un-inferable ARITHMETIC cryptarithm problems to SKIP in the corpus
+    (pure inference could not recover them honestly). Their concat-fallback
+    reasoning is wrong and the gold-conditioned trace is non-generalizing, so the
+    honest arm trains on neither. Produced alongside the honest cache."""
+    p = _HONEST_DIR / "crypt_drop_ids.json"
+    if not p.exists():
+        return set()
+    return set(json.loads(p.read_text(encoding="utf-8")))

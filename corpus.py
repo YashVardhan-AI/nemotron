@@ -77,6 +77,16 @@ CRYPT_REPLACE_REAL = True
 CRYPT_SYMBOLIC = os.environ.get("CRYPT_SYMBOLIC", "0") != "0"
 CRYPT_SYMBOLIC_STYLE = os.environ.get("CRYPT_SYMBOLIC_STYLE", "assert")
 
+# HONEST arm: render cryptarithm traces from the PURE-INFERENCE solve (no gold
+# hint, ~62% recovered) and DROP the un-inferable rest, instead of the
+# gold-conditioned (answer-reverse-fit, non-generalizing) traces that
+# load_symbolic_reasoning emits -- the measured root cause of all three crypt
+# arms scoring ~0% at test despite the task being 62% inferable. Default style
+# derive_search. Build the cache first:
+#   uv run python val/gen_crypt_honest.py derive_search 659
+#   CRYPT_HONEST=1 uv run corpus.py
+CRYPT_HONEST = os.environ.get("CRYPT_HONEST", "0") != "0"
+
 # --- bit_manipulation forward-gen (the bit lever) ----------------------------
 # ADD N verified per-bit-induction traces for the families the corpus does NOT
 # teach: complex 3-input (the solver reasoners/bit_manipulation.py cannot express
@@ -522,7 +532,25 @@ def main() -> None:
 
     # Correct symbolic-solver cryptarithm reasoning, keyed by real train id.
     symbolic_reasoning: dict[str, str] = {}
-    if CRYPT_SYMBOLIC:
+    crypt_drop_ids: set[str] = set()
+    if CRYPT_HONEST:
+        from reasoners.crypt_symbolic_corpus import (
+            load_crypt_drop_ids,
+            load_honest_symbolic_reasoning,
+        )
+
+        honest_style = (
+            CRYPT_SYMBOLIC_STYLE
+            if CRYPT_SYMBOLIC_STYLE != "assert"
+            else "derive_search"
+        )
+        symbolic_reasoning = load_honest_symbolic_reasoning(honest_style)
+        crypt_drop_ids = load_crypt_drop_ids()
+        print(
+            f"[corpus] HONEST cryptarithm traces: {len(symbolic_reasoning)} "
+            f"(style={honest_style}); dropping {len(crypt_drop_ids)} un-inferable"
+        )
+    elif CRYPT_SYMBOLIC:
         from reasoners.crypt_symbolic_corpus import load_symbolic_reasoning
 
         symbolic_reasoning = load_symbolic_reasoning(CRYPT_SYMBOLIC_STYLE)
@@ -557,6 +585,12 @@ def main() -> None:
         # Downsample saturated categories (deterministic, stable across runs).
         rate = DOWNSAMPLE_RATES.get(category)
         if rate is not None and not _keep_by_hash(problem_id, rate):
+            continue
+
+        # HONEST arm: skip arithmetic cryptarithm we cannot honestly derive (pure
+        # inference failed). Training on its wrong concat-fallback reasoning or the
+        # gold-conditioned rationalization is exactly what poisoned prior arms.
+        if crypt_drop_ids and problem_id in crypt_drop_ids:
             continue
 
         reasoning_text = (
