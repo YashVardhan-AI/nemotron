@@ -26,6 +26,12 @@ differs:
                magnitudes are spelled least-significant-digit-first in the reversed
                modes. Falls back to a "lean" map where `_derive_order` is unsound,
                but KEEPS the LSB-first encoding annotations everywhere.
+  * "derive_search" — the LONG arm. Mirrors `reasoning_equation_numeric` (the
+               student's closest analog, learned ~87.5%): map FIRST, then an
+               enumerate-and-test that tries candidate OPERATIONS on the known digits
+               and shows wrong/match for each (Stream-of-Search shape). Universal —
+               the op-search works in every base/mode — so it is the long, high-budget
+               counterpart to the short bounded styles above.
 `_derive_order` is sound only for base==10 + std/alice (it hardcodes base 10, flips
 only for `alice`, and zeroes domains on concat ops — so concat ops are stripped
 before the call and other regimes use "lean").
@@ -609,7 +615,7 @@ def _binding_example(step):
     return None
 
 
-def _step2_derive_inductive(trace) -> list[str]:
+def _step2_derive_inductive(trace, header=None) -> list[str]:
     """BOUNDED, step-count-INDEPENDENT map deduction: exactly one fixed-shape row
     per glyph, in the solver's MRV commit order. Each row is the SAME local
     state-update — (digits already fixed) intersected with (what the examples still
@@ -623,12 +629,17 @@ def _step2_derive_inductive(trace) -> list[str]:
     example). Every value comes straight from the solver's own forward-checking:
     `step['domain']` is the post-propagation domain at commit, `determined_before`
     the digits already fixed, the binder its per-example intersection — so each row
-    is correct by construction."""
+    is correct by construction.
+
+    `header` overrides the section header (so derive_search can label this Step 1)."""
     lines = [
-        "Step 2 - pin down the glyph -> digit map one glyph at a time. I keep the set "
-        "of digits already fixed; for the next glyph I read the examples in order, "
-        "keeping only the digits still consistent (every glyph is a distinct digit), "
-        "and commit the most-constrained glyph each round:"
+        header
+        or (
+            "Step 2 - pin down the glyph -> digit map one glyph at a time. I keep the "
+            "set of digits already fixed; for the next glyph I read the examples in "
+            "order, keeping only the digits still consistent (every glyph is a distinct "
+            "digit), and commit the most-constrained glyph each round:"
+        )
     ]
     for step in trace:
         sym, digit = step["sym"], step["digit"]
@@ -658,6 +669,164 @@ def _step2_derive_inductive(trace) -> list[str]:
     return lines
 
 
+# ───────────── operator enumerate-and-test (derive_search, long) ─────────────
+# Mirrors the proven LONG shape of reasoning_equation_numeric (the student's closest
+# analog task, learned ~87.5%): once the digits are known, IDENTIFY each operator by
+# trying candidate operations and showing wrong/match for each. Common ops are always
+# enumerated (equation tries all); rare ops are appended only up to the true op so the
+# match always appears without listing all 47. Every test reuses the verified
+# base/mode-aware semantics (_op_value/_encode_mag), so it can never disagree.
+
+_COMMON_SEARCH_OPS = [
+    "add",
+    "sub",
+    "rsub",
+    "absdiff",
+    "mul",
+    "concat_fwd",
+    "concat_rev",
+    "mod",
+    "rmod",
+    "gcd",
+    "lcm",
+    "fdiv",
+    "rdiv",
+    "min",
+    "max",
+]
+_RARE_SEARCH_OPS = [
+    "add_p1",
+    "add_m1",
+    "add_p2",
+    "add_m2",
+    "mul_p1",
+    "mul_m1",
+    "mul_p2",
+    "mul_m2",
+    "sub_p1",
+    "sub_m1",
+    "rsub_p1",
+    "rsub_m1",
+    "absdiff_p1",
+    "absdiff_m1",
+    "absdiff_p2",
+    "absdiff_m2",
+    "mul_double",
+    "mul_half",
+    "sq_diff",
+    "sq_sum",
+    "mul_plus_a",
+    "mul_plus_b",
+    "mul_minus_a",
+    "mul_minus_b",
+    "a2_plus_b",
+    "a_plus_b2",
+    "neg_absdiff",
+    "sub_signed",
+    "rsub_signed",
+]
+
+
+def _candidate_sequence(true_ot: str) -> list[str]:
+    """Common ops (always shown, equation-style), then rare ops up to and INCLUDING
+    the true op so the match always appears without dumping all 47 candidates."""
+    seq = list(_COMMON_SEARCH_OPS)
+    if true_ot not in seq:
+        for ot in _RARE_SEARCH_OPS:
+            seq.append(ot)
+            if ot == true_ot:
+                break
+        if true_ot not in seq:  # safety: op outside both lists
+            seq.append(true_ot)
+    return seq
+
+
+def _candidate_on_example(lhs, rhs, cand, mapping, base, reversed_mode, rev_map):
+    """Apply candidate op `cand` to one example; return (ok, shown). ok is True iff it
+    reproduces rhs exactly. `shown` is the human arithmetic string. All values come
+    from the shared verified semantics — never a re-implemented operation."""
+    c0, c1, opc, c3, c4 = lhs[0], lhs[1], lhs[2], lhs[3], lhs[4]
+    if cand in CONCAT_OPS:
+        enc = (c0 + c1 + c3 + c4) if cand == "concat_fwd" else (c3 + c4 + c0 + c1)
+        return (enc == rhs, f"glue the glyphs -> {_glyph_sep(enc)}")
+    if any(c not in mapping for c in (c0, c1, c3, c4)):
+        return (False, "an operand glyph is not in the map")
+    left = _two_digit(mapping[c0], mapping[c1], base, reversed_mode)
+    right = _two_digit(mapping[c3], mapping[c4], base, reversed_mode)
+    sv = _op_value(cand, left, right)
+    if sv is None:
+        return (False, f"{_expr(cand, left, right)} is undefined/negative here")
+    signed, mag = sv
+    if signed:
+        if not (rhs and rhs[0] == opc):
+            return (
+                False,
+                f"{_expr(cand, left, right)} = -{mag}, but no sign glyph here",
+            )
+        enc_mag = _encode_mag(mag, base, reversed_mode, rev_map, len(rhs) - 1)
+        enc = (opc + enc_mag) if enc_mag is not None else None
+    else:
+        enc = _encode_mag(mag, base, reversed_mode, rev_map, len(rhs))
+    shown = f"{_expr(cand, left, right)} = {'-' if signed else ''}{mag}"
+    if enc is None:
+        return (False, f"{shown}, which doesn't fit the {len(rhs)}-glyph result")
+    return (enc == rhs, f"{shown} -> spells {_glyph_sep(enc)}")
+
+
+def _eval_candidate(cand, exs, mapping, base, reversed_mode, rev_map):
+    """Test candidate across ALL of an operator's examples (it is the rule only if it
+    matches every one). Returns (all_ok, shown) where shown is the first FAILING
+    example's arithmetic, or the first example's if all pass."""
+    first = None
+    for lhs, rhs in exs:
+        ok, shown = _candidate_on_example(
+            lhs, rhs, cand, mapping, base, reversed_mode, rev_map
+        )
+        if first is None:
+            first = shown
+        if not ok:
+            return (False, shown)
+    return (True, first)
+
+
+def _op_search_block(examples, ops, mapping, base, reversed_mode) -> list[str] | None:
+    """Equation_numeric-style enumerate-and-test operator identification. Returns the
+    lines, or None if the named (true) op fails to match its own examples (defensive:
+    that should never happen since the program reproduces every gold)."""
+    rev_map = {d: g for g, d in mapping.items()}
+    by_op: dict[str, list] = {}
+    for lhs, rhs in _eligible_examples(examples, ops, mapping):
+        by_op.setdefault(lhs[2], []).append((lhs, rhs))
+    if not by_op:
+        return None
+    lines = [
+        "Step 2 - now identify each operator: with the digits known, try candidate "
+        "operations and keep the one matching every example (a negative result is "
+        "written with the operator glyph in front):"
+    ]
+    for opc in sorted(by_op):
+        exs = by_op[opc]
+        true_ot = ops[opc]
+        shown_exs = ", ".join(
+            f"{_glyph_sep(lhs)} = {_glyph_sep(rhs)}" for lhs, rhs in exs
+        )
+        lines.append(f"  Operator `{opc}`  [{shown_exs}]:")
+        for cand in _candidate_sequence(true_ot):
+            ok, shown = _eval_candidate(
+                cand, exs, mapping, base, reversed_mode, rev_map
+            )
+            if cand == true_ot:
+                if not ok:
+                    return None  # program/render inconsistency -> drop the trace
+                tag = "MATCHES every example -> this is the operator"
+            elif ok:
+                tag = "also fits (kept the named operator below)"
+            else:
+                tag = "no"
+            lines.append(f"    {_OP_PHRASE.get(cand, cand)}: {shown} -> {tag}")
+    return lines
+
+
 # ─────────────────────────── public renderer ───────────────────────────
 
 
@@ -669,7 +838,7 @@ def render_with_tier(prompt, mapping, ops, mode, base, gold, style="assert"):
     examples, query = _parse(prompt)
     reversed_mode = _reversed_mode(mode)
     symbols = sorted(mapping.keys())
-    annotate = style == "derive_inductive"
+    annotate = style in ("derive_inductive", "derive_search")
 
     eligible = _eligible_examples(examples, ops, mapping)
     if not eligible:
@@ -681,6 +850,45 @@ def render_with_tier(prompt, mapping, ops, mode, base, gold, style="assert"):
     if q is None:
         return None
     query_block, _enc = q
+
+    # derive_search: the LONG, equation_numeric-style arm — map (bounded) FIRST, then
+    # an enumerate-and-test operator id on the known digits, then verify + apply.
+    if style == "derive_search":
+        op_lines = _op_search_block(examples, ops, mapping, base, reversed_mode)
+        if op_lines is None:
+            return None
+        map_step = None
+        if base == 10 and mode in ("standard", "alice"):
+            d = _derive(prompt, mapping, ops, mode, gold)
+            if d is not None:
+                _order, trace = d
+                map_step = _step2_derive_inductive(
+                    trace,
+                    header=(
+                        "Step 1 - first recover the glyph -> digit map. I keep the "
+                        "digits already fixed and, for the next glyph, keep only the "
+                        "values the examples still allow (every glyph is a distinct "
+                        "digit), committing the most-constrained glyph each round:"
+                    ),
+                )
+        if map_step is None:
+            map_step = [
+                "Step 1 - the glyph -> digit map consistent with the examples is:",
+                _map_line(mapping),
+            ]
+        lines = _intro_lines(base, reversed_mode, symbols)
+        lines.append("")
+        lines += map_step
+        lines.append("")
+        lines += op_lines
+        lines.append("")
+        lines.append("Step 3 - check the rule against every example:")
+        lines += verify_lines
+        lines.append("")
+        lines += query_block
+        lines.append("")
+        lines.append(f"So the answer is \\boxed{{{gold}}}")
+        return "\n".join(lines), "derive_search"
 
     step2, actual = None, "lean"
     if (
@@ -735,7 +943,14 @@ def render(prompt, mapping, ops, mode, base, gold, style="assert") -> str | None
       "derive_inductive" — bounded one-row-per-glyph map + LSB-first encoding
                  annotations (reversed modes); the step-count-independent recast of
                  "derive" (see _step2_derive_inductive). Falls back to lean map.
-    All styles share Step 1 (operator id), Step 3 (verify), Step 4 (apply)."""
+      "derive_search" — LONG, equation_numeric-style: map FIRST (bounded), then an
+                 enumerate-and-test operator id on the known digits showing wrong/match
+                 per candidate (the proven ~87.5% shape), then verify + apply. Universal
+                 (op-search works in every base/mode); map uses derive_inductive where
+                 sound, else lean. (see _op_search_block)
+    The assert/derive/derive_inductive/lean styles share Step 1 (operator id), Step 3
+    (verify), Step 4 (apply); derive_search reorders to map -> op-search -> verify ->
+    apply."""
     r = render_with_tier(prompt, mapping, ops, mode, base, gold, style)
     return r[0] if r is not None else None
 

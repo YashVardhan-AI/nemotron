@@ -10,8 +10,9 @@ existing completion assembly (extract last \\boxed -> gold -> wrap) works unchan
 `style` is the A/B knob: "assert" (MRV forced/guess scratchpad) vs "derive"
 (genuine constraint-propagation deduction) vs "derive_inductive" (bounded
 one-row-per-glyph deduction + LSB-first encoding — the step-count-independent
-recast) vs "lean" (state map only). All are validated correct by
-`val/gen_crypt_symbolic.py` (725/725, 0 round-trip fail).
+recast) vs "derive_search" (the LONG, equation_numeric-style enumerate-and-test
+operator id — ~2.2k tok p50, the high-budget arm) vs "lean" (state map only).
+All are validated correct by `val/gen_crypt_symbolic.py` (725/725, 0 round-trip fail).
 """
 
 from __future__ import annotations

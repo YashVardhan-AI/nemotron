@@ -55,7 +55,13 @@ BUDGET_FULL = 7000  # informational: headroom before the decode budget
 # "derive_inductive" (bounded one-row-per-glyph + LSB-first encoding) vs "lean" (no
 # digit-deduction). Base-10 std/alice get the deduction; the rest fall back to lean.
 STYLE = sys.argv[1] if len(sys.argv) > 1 else "assert"
-assert STYLE in ("assert", "derive", "derive_inductive", "lean"), f"bad style {STYLE!r}"
+assert STYLE in (
+    "assert",
+    "derive",
+    "derive_inductive",
+    "derive_search",
+    "lean",
+), f"bad style {STYLE!r}"
 
 _tok = Tokenizer.from_file(str(TOKENIZER_PATH))
 
