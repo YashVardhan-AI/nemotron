@@ -202,10 +202,13 @@ is proven insufficient (data-mixing is the research-backed default; merging/DARE
 
 **Experimental design — ONE decisive combined arm, then ablate only if needed.** Per the
 "don't burn a cycle on format alone" rationale:
-- **Arm B1 (primary):** `derive_inductive` on **725 real (P1) + ~2000 synthetic (P2)**,
+- **Arm B1 (primary):** **`derive_search`** on **725 real (P1) + ~2000 synthetic (P2)**,
   `cryptarithm_deduce`≈1500, concat at real freq (P3), cipher+equation held. **1 epoch →
   Kaggle eval temp=0/7680.** The eval **sub-category breakdown** (crypt arithmetic vs concat;
   cipher; equation) is the built-in diagnostic — one run tells us format+data+regression at once.
+  (A cheap second arm swaps `derive_search`→`derive_inductive` to A/B long-search vs
+  short-bounded if both are affordable; otherwise `derive_search` is the primary bet — see the
+  trace-length finding below.)
 - **Revert/contain criteria:** cipher or equation drop **>2pp** → dial the cryptarithm target
   down (1500→1000) or invoke Lever 3. Crypt arithmetic still ~0% → format/identifiability
   ceiling (escalate to P4 STaR or P5 teacher narration). Crypt up **and** canaries hold → win;
@@ -213,6 +216,38 @@ is proven insufficient (data-mixing is the research-backed default; merging/DARE
 - **Ablations (only if B1 is ambiguous):** B1 minus P2 (format-only) and B1 minus P3
   (ratio sensitivity) — to attribute a null. Accepted tradeoff: B1 confounds the three levers
   for the chance of a clean win; the sub-category breakdown de-confounds most outcomes anyway.
+
+### TRACE-LENGTH FINDING + `derive_search` (2026-06-10) — likely the bigger lever
+
+Measured real reasoning-trace token lengths per category against student accuracy:
+
+| Category | p50 tokens | Student acc |
+|---|---|---|
+| bit_manipulation | 6736 | ~88% |
+| equation_numeric_deduce | 5783 | ~87.5% |
+| cipher | 2895 | ~100% |
+| **cryptarithm_deduce (real)** | **611** | **~8.5%** |
+| `derive_inductive` (P1) | 869 | — |
+| **`derive_search` (new)** | **2184** | — |
+
+**Every category the student wins on uses LONG traces (2.9k–6.7k tok); cryptarithm — the one
+it fails — uses ~600.** The short-trace bias (mine *and* the repo's) was probably backwards:
+`equation_numeric` is the **closest analog** (secret-operator induction) and wins with a
+**long enumerate-and-test** that shows every WRONG operator candidate before the match. And the
+"long cryptarithm traces crash neighbors" fear is **misattributed** — the *short* bit forward-gen
+(BIT_N=800) crashed neighbors too (88→22), so the crashes were forward-gen **volume**, not
+length (that's P3). I under-weighted Stream-of-Search (+25pt) vs the from-scratch bounded
+guardrail; the repo's own winning categories are the stronger prior → **go long**.
+
+**`derive_search` — BUILT + VALIDATED + COMMITTED 2026-06-10.** Mirrors
+`reasoning_equation_numeric`: **Step 1** map (bounded `derive_inductive` rows) FIRST, **Step 2**
+an enumerate-and-test that tries candidate operations on the now-known digits and shows
+wrong/match per candidate (common ops always, rare ops up to the true op), then verify + apply.
+Every candidate test reuses the verified `_op_value`/`_encode_mag` semantics (hand-checked in
+standard + little_endian). **Universal** — the op-search works in every base/mode, so all 725
+render at this tier (no lean fallback, unlike `derive_inductive`'s 326). Validated 725/725
+round-trip, 0 drops, **p50=2184 / max=3396 tok** (in the proven range, far under 7680);
+`assert/derive/derive_inductive/lean` outputs unchanged. **This is now the primary long arm.**
 
 **Build order:** P2 generator + its validation gate (no train) → fold P3 ratios into the
 corpus build → build Arm B1 corpus (destructive rebuild, user-gated) → user trains → eval.
