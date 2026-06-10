@@ -62,6 +62,21 @@ HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
 # them with the verified forward-gen traces rather than mixing both.
 CRYPT_REPLACE_REAL = True
 
+# --- symbolic-solver cryptarithm traces (CORRECT, full-distribution) -----------
+# Replace the wrong concat-fallback real cryptarithm reasoning (reasoning/*.txt)
+# with traces rendered from the VERIFIED solver (kaggle-nemotron-equation-symbolic).
+# Covers ~725 of the ~781 real cryptarithm problems; each is round-trip-checked to
+# reproduce gold (see reasoners/crypt_symbolic_corpus.py + memory
+# crypt-symbolic-renderer-built). CRYPT_SYMBOLIC_STYLE is the A/B knob:
+#   "assert"           = MRV forced/guess scratchpad ;
+#   "derive"           = genuine (variable-length) propagation ;
+#   "derive_inductive" = bounded one-row-per-glyph + binding-equation citation +
+#                        LSB-first encoding (the step-count-independent recast) ;
+#   "lean"             = state the map only. Enable per run, e.g.:
+#   CRYPT_SYMBOLIC=1 CRYPT_SYMBOLIC_STYLE=derive_inductive uv run corpus.py
+CRYPT_SYMBOLIC = os.environ.get("CRYPT_SYMBOLIC", "0") != "0"
+CRYPT_SYMBOLIC_STYLE = os.environ.get("CRYPT_SYMBOLIC_STYLE", "assert")
+
 # --- bit_manipulation forward-gen (the bit lever) ----------------------------
 # ADD N verified per-bit-induction traces for the families the corpus does NOT
 # teach: complex 3-input (the solver reasoners/bit_manipulation.py cannot express
@@ -505,6 +520,17 @@ def main() -> None:
     for prob_raw in load_jsonl(PROBLEMS_INDEX):
         problem_cats[prob_raw["id"]] = prob_raw["category"]
 
+    # Correct symbolic-solver cryptarithm reasoning, keyed by real train id.
+    symbolic_reasoning: dict[str, str] = {}
+    if CRYPT_SYMBOLIC:
+        from reasoners.crypt_symbolic_corpus import load_symbolic_reasoning
+
+        symbolic_reasoning = load_symbolic_reasoning(CRYPT_SYMBOLIC_STYLE)
+        print(
+            f"[corpus] symbolic cryptarithm traces: {len(symbolic_reasoning)} "
+            f"(style={CRYPT_SYMBOLIC_STYLE})"
+        )
+
     # Clean and recreate corpus directory
     if CORPUS_DIR.exists():
         shutil.rmtree(CORPUS_DIR)
@@ -538,6 +564,16 @@ def main() -> None:
             .read_text(encoding="utf-8")
             .rstrip("\n")
         )
+
+        # Override wrong concat-fallback cryptarithm reasoning with the verified
+        # symbolic-solver trace (correct, glyph-separated). Uncovered cryptarithm
+        # ids (~56) keep their real reasoning.
+        if (
+            symbolic_reasoning
+            and category.startswith("cryptarithm")
+            and problem_id in symbolic_reasoning
+        ):
+            reasoning_text = symbolic_reasoning[problem_id]
 
         # Extract answer from reasoning's \boxed{} so they match
         boxed_match = re.findall(r"\\boxed\{([^}]*)\}", reasoning_text)
