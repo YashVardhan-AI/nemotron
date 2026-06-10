@@ -114,8 +114,108 @@ teacher distillation on solvable categories — **distinct from P5's solver-grou
 cryptarithm narration** (the teacher can't *solve* cryptarithm, so only use it to *narrate*
 the solver's known answer, never as the correctness source).
 
-**Immediate next step:** build P1, then ONE train+eval to validate the format before P2.
-Memory: `cryptarithm-armA-null-and-research-plan`.
+**Immediate next step:** P1 is BUILT. Next = the combined P1+P2+P3 arm (below), then
+ONE train+eval. Memory: `cryptarithm-armA-null-and-research-plan`.
+
+---
+
+## P2 / P3 — DETAILED DESIGN (2026-06-10)
+
+Grounded in the actual infra (`corpus.py`, `cryptarithm_deduce_core.py`,
+`solver_results.parquet`, the live prompt format). **Decisive fork found:** the *existing*
+forward-gen generator (`build_cryptarithm_examples` → `make_trace_problem` →
+`cryptarithm_rule`/`cryptarithm_deduce_core`) is the **OLD NARROW MODEL** — only 5 ops
+(add/abs_diff/mul/concat/rev_concat), **base 10**, **standard order** (`_OPS`,
+`d0*10+d1`). That is exactly the **12% slice** the symbolic-solver breakthrough escaped, so
+**it cannot be reused for P2** — it would re-inject the off-distribution data that made
+cryptarithm unlearnable. P2 must be a **new rich generator** on the solver's distribution.
+
+### Prompt format the generator must emit (confirmed from live data)
+```
+In Alice's Wonderland, a secret set of transformation rules is applied to equations. Below are a few examples:
+<L0L1 OP L3L4> = <RESULT>     ← 4 example lines, glyphs UN-spaced (raw) in the prompt
+... (×4)
+Now, determine the result for: <Q0Q1 OP Q3Q4>
+```
+(Glyph space-separation is ONLY in the CoT/reasoning to defeat BPE merge; the prompt itself
+is raw glyphs. The renderer + completion assembly already handle this.)
+
+### P2 — Rich symbolic cryptarithm generator [medium effort; the scale lever]
+**Objective:** 3k (→5k) FRESH, holdout-safe, **distribution-matched** puzzles → `derive_inductive`
+traces, to cross the data phase transition (725 real uniques may be sub-threshold).
+
+**New module `reasoners/crypt_symbolic_gen.py`** (+ `build_crypt_symbolic_examples()` in
+corpus.py, env `CRYPT_SYM_N`). Pipeline per puzzle:
+1. **Sample a program from the EMPIRICAL marginals** of the 725 solved real puzzles
+   (`solver_results.parquet`): base ∈ {10:691, 9:27, 8:6, 7:1}; mode ∈ {standard:423,
+   little_endian:302}; per-operator op ∼ the real `solver_ops` frequency over the 47-op
+   library; #examples ≈ 4; 1–3 distinct operator glyphs. **Include concat/mixed-concat at
+   real frequency** (directly fixes arm A's concat regression — see P3).
+2. **Pick a glyph alphabet** from the real printable-punctuation inventory; random bijection
+   to digits 0..B−1.
+3. **Construct examples + query**: sample operand glyph-pairs + operator glyph; compute each
+   RHS by **reusing the renderer's own verified semantics** (`crypt_symbolic_trace._apply_eq`,
+   `_encode_mag`, `_op_value`, `_two_digit`) — so generation and rendering share one source of
+   truth and can never disagree.
+4. **Uniqueness/learnability filter (KEY):** run the **rich solver `AliceEquationSolver`
+   WITHOUT the gold hint**; keep the puzzle ONLY if it recovers the planted answer as the
+   unique pure-inference solution. This (a) guarantees the trace teaches a genuinely-inferable
+   instance, and (b) **bounds the synthetic set to the solver's ~72% learnable region** —
+   generating outside it would teach unlearnable global-constraint puzzles.
+5. **Holdout/dedup:** prompt-hash dedup vs (real train prompts ∪ val prompts ∪ already-emitted);
+   random programs make collision negligible, but gate anyway (keeps val honest).
+6. **Render `derive_inductive` + round-trip gate:** `\boxed` must reproduce gold (drop misses),
+   ≤7680 tokens. Emit `(pid, prompt, completion, answer)` like `build_cryptarithm_examples`.
+
+**Validation gate (BEFORE any train):** generate 3k and report — yield (attempts/kept &
+unique-solvable %), **distribution match vs real** (op/base/mode KL or side-by-side), round-trip
+100%, budget p50/p90/max, dedup collisions (=0 expected), glyph un-merge, 10 eyeballed samples.
+Reuse the `val/gen_crypt_symbolic.py` harness shape.
+
+**Risks:** (a) unique-solvable **yield** may be low (random rich programs are often
+underdetermined) → measure attempts/kept; raise `max_salt`-style resampling. (b) The filter
+biases toward EASIER puzzles — acceptable (we want the learnable region), but report the
+difficulty/op-count distribution so we know what we're teaching. (c) Distribution drift from
+the real test → mitigated by empirical-marginal sampling + the match report.
+
+### P3 — Regression control [parallel; the crux of a NET gain]
+**The tension (made concrete):** the `DUP_TARGETS` cap *is* the mixing ratio. Today
+cryptarithm = 627+154 ≈ **10%** of 7830 rows. P1 (replace 725 real, same prompts) is
+ratio-neutral; **P2 ADDS uniques**, and to actually USE them the cryptarithm target must RISE
+— which inflates cryptarithm's gradient share and risks the arm-A neighbor crash (−2pp). Budget:
+**≤2.8pp** neighbor regression is affordable for a +5.8pp gross.
+
+**Lever 1 — mixing ratio (primary).** Set `DUP_TARGETS["cryptarithm_deduce"]` to a MODERATE
+value that consumes the synthetic uniques without swamping — start **~1500** (≈18% share; was
+627). Because P2 adds *unique* samples (not dups), even a moderate target gives diverse
+cryptarithm gradient — strictly better than dup'ing 725. Hold **cipher (1656)** and
+**equation (658+126)** at winning-recipe levels as **canaries**.
+**Lever 2 — concat-protection (arm A's specific failure).** Arm A regressed concat 100%→40%
+because the symbolic override replaced the concat-fallback rows that *were* getting concat
+right. Fix at the source: the P2 generator emits **pure-concat + mixed-concat puzzles at their
+real frequency**, and the renderer already handles concat (lean verify). Track **concat
+sub-accuracy** explicitly in eval.
+**Lever 3 — O-LoRA / LoRI-D (fallback only).** If Levers 1–2 can't hold the canaries:
+orthogonal-subspace LoRA (penalize overlap between the cryptarithm update subspace and the
+frozen neighbor subspace) — a `train_sft.py` change, higher effort, deferred until data-mixing
+is proven insufficient (data-mixing is the research-backed default; merging/DARE are DEAD).
+
+**Experimental design — ONE decisive combined arm, then ablate only if needed.** Per the
+"don't burn a cycle on format alone" rationale:
+- **Arm B1 (primary):** `derive_inductive` on **725 real (P1) + ~2000 synthetic (P2)**,
+  `cryptarithm_deduce`≈1500, concat at real freq (P3), cipher+equation held. **1 epoch →
+  Kaggle eval temp=0/7680.** The eval **sub-category breakdown** (crypt arithmetic vs concat;
+  cipher; equation) is the built-in diagnostic — one run tells us format+data+regression at once.
+- **Revert/contain criteria:** cipher or equation drop **>2pp** → dial the cryptarithm target
+  down (1500→1000) or invoke Lever 3. Crypt arithmetic still ~0% → format/identifiability
+  ceiling (escalate to P4 STaR or P5 teacher narration). Crypt up **and** canaries hold → win;
+  push synthetic toward 5k.
+- **Ablations (only if B1 is ambiguous):** B1 minus P2 (format-only) and B1 minus P3
+  (ratio sensitivity) — to attribute a null. Accepted tradeoff: B1 confounds the three levers
+  for the chance of a clean win; the sub-category breakdown de-confounds most outcomes anyway.
+
+**Build order:** P2 generator + its validation gate (no train) → fold P3 ratios into the
+corpus build → build Arm B1 corpus (destructive rebuild, user-gated) → user trains → eval.
 
 ---
 
