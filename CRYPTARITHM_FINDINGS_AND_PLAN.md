@@ -178,6 +178,18 @@ biases toward EASIER puzzles — acceptable (we want the learnable region), but 
 difficulty/op-count distribution so we know what we're teaching. (c) Distribution drift from
 the real test → mitigated by empirical-marginal sampling + the match report.
 
+**✅ BUILT + VALIDATED + COMMITTED 2026-06-10.** `reasoners/crypt_symbolic_gen.py` +
+`val/gen_crypt_synth.py`. **Required building the Rust solver accelerator** (`alice_sovler_helper`
+via the GNU toolchain — Python search is **5800 ms/solve**, infeasible; Rust is **205 ms p50**,
+28×; see memory `rust-solver-accelerator-build`). The learnability filter calls the solver's
+normal-level path directly (skips the 38-op deep-search escalation on rejects). **N=300 gate:
+67% yield, 300/300 round-trip, 0 dedup collisions vs real, 0 over-budget** (p50=2186/max=4051),
+gradeable 263/300 (= real brace cap). **Distribution matches real:** base {10:.95, 9:.04} == real,
+mode 61/39 vs 58/42, op-types close (mul slightly over 26 vs 21%, **concat under 2.1 vs 5.8%** —
+minor; nudge concat sampling up for P3's concat-protection if wanted). Renders `derive_search` by
+default. Speed ~1.1 s/kept incl. a long tail (some 15 s solves) → ~3k ≈ ~1 hr background run.
+**Risks (a)/(c) retired** (yield fine, no drift, no synth-only op-types).
+
 ### P3 — Regression control [parallel; the crux of a NET gain]
 **The tension (made concrete):** the `DUP_TARGETS` cap *is* the mixing ratio. Today
 cryptarithm = 627+154 ≈ **10%** of 7830 rows. P1 (replace 725 real, same prompts) is
