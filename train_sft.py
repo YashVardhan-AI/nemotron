@@ -99,10 +99,7 @@ class Cfg:
     )
     model_name: str = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
     batch_size: int = 32
-    num_epochs: int = 2  # 2-epoch A/B: total_steps=n_batches*epochs and `step` is
-    # global, so the StepLinearDecay LR stretches over BOTH passes (1e-4 at the end of
-    # epoch 0, ->0 at the final step) instead of hitting 0 at step ~245. Addresses the
-    # decay-to-zero-at-245 under-training smell (memory: training-recipe-unswept-levers).
+    num_epochs: int = 1
     lora_rank: int = 32  # 32
     max_length: int = 8192
     train_mlp: bool = True

@@ -62,31 +62,6 @@ HOLDOUT_RULES = Path(__file__).parent / "holdout_rules.json"
 # them with the verified forward-gen traces rather than mixing both.
 CRYPT_REPLACE_REAL = True
 
-# --- symbolic-solver cryptarithm traces (CORRECT, full-distribution) -----------
-# Replace the wrong concat-fallback real cryptarithm reasoning (reasoning/*.txt)
-# with traces rendered from the VERIFIED solver (kaggle-nemotron-equation-symbolic).
-# Covers ~725 of the ~781 real cryptarithm problems; each is round-trip-checked to
-# reproduce gold (see reasoners/crypt_symbolic_corpus.py + memory
-# crypt-symbolic-renderer-built). CRYPT_SYMBOLIC_STYLE is the A/B knob:
-#   "assert"           = MRV forced/guess scratchpad ;
-#   "derive"           = genuine (variable-length) propagation ;
-#   "derive_inductive" = bounded one-row-per-glyph + binding-equation citation +
-#                        LSB-first encoding (the step-count-independent recast) ;
-#   "lean"             = state the map only. Enable per run, e.g.:
-#   CRYPT_SYMBOLIC=1 CRYPT_SYMBOLIC_STYLE=derive_inductive uv run corpus.py
-CRYPT_SYMBOLIC = os.environ.get("CRYPT_SYMBOLIC", "0") != "0"
-CRYPT_SYMBOLIC_STYLE = os.environ.get("CRYPT_SYMBOLIC_STYLE", "assert")
-
-# HONEST arm: render cryptarithm traces from the PURE-INFERENCE solve (no gold
-# hint, ~62% recovered) and DROP the un-inferable rest, instead of the
-# gold-conditioned (answer-reverse-fit, non-generalizing) traces that
-# load_symbolic_reasoning emits -- the measured root cause of all three crypt
-# arms scoring ~0% at test despite the task being 62% inferable. Default style
-# derive_search. Build the cache first:
-#   uv run python val/gen_crypt_honest.py derive_search 659
-#   CRYPT_HONEST=1 uv run corpus.py
-CRYPT_HONEST = os.environ.get("CRYPT_HONEST", "0") != "0"
-
 # --- bit_manipulation forward-gen (the bit lever) ----------------------------
 # ADD N verified per-bit-induction traces for the families the corpus does NOT
 # teach: complex 3-input (the solver reasoners/bit_manipulation.py cannot express
@@ -530,35 +505,6 @@ def main() -> None:
     for prob_raw in load_jsonl(PROBLEMS_INDEX):
         problem_cats[prob_raw["id"]] = prob_raw["category"]
 
-    # Correct symbolic-solver cryptarithm reasoning, keyed by real train id.
-    symbolic_reasoning: dict[str, str] = {}
-    crypt_drop_ids: set[str] = set()
-    if CRYPT_HONEST:
-        from reasoners.crypt_symbolic_corpus import (
-            load_crypt_drop_ids,
-            load_honest_symbolic_reasoning,
-        )
-
-        honest_style = (
-            CRYPT_SYMBOLIC_STYLE
-            if CRYPT_SYMBOLIC_STYLE != "assert"
-            else "derive_search"
-        )
-        symbolic_reasoning = load_honest_symbolic_reasoning(honest_style)
-        crypt_drop_ids = load_crypt_drop_ids()
-        print(
-            f"[corpus] HONEST cryptarithm traces: {len(symbolic_reasoning)} "
-            f"(style={honest_style}); dropping {len(crypt_drop_ids)} un-inferable"
-        )
-    elif CRYPT_SYMBOLIC:
-        from reasoners.crypt_symbolic_corpus import load_symbolic_reasoning
-
-        symbolic_reasoning = load_symbolic_reasoning(CRYPT_SYMBOLIC_STYLE)
-        print(
-            f"[corpus] symbolic cryptarithm traces: {len(symbolic_reasoning)} "
-            f"(style={CRYPT_SYMBOLIC_STYLE})"
-        )
-
     # Clean and recreate corpus directory
     if CORPUS_DIR.exists():
         shutil.rmtree(CORPUS_DIR)
@@ -587,27 +533,11 @@ def main() -> None:
         if rate is not None and not _keep_by_hash(problem_id, rate):
             continue
 
-        # HONEST arm: skip arithmetic cryptarithm we cannot honestly derive (pure
-        # inference failed). Training on its wrong concat-fallback reasoning or the
-        # gold-conditioned rationalization is exactly what poisoned prior arms.
-        if crypt_drop_ids and problem_id in crypt_drop_ids:
-            continue
-
         reasoning_text = (
             (REASONING_DIR / f"{problem_id}.txt")
             .read_text(encoding="utf-8")
             .rstrip("\n")
         )
-
-        # Override wrong concat-fallback cryptarithm reasoning with the verified
-        # symbolic-solver trace (correct, glyph-separated). Uncovered cryptarithm
-        # ids (~56) keep their real reasoning.
-        if (
-            symbolic_reasoning
-            and category.startswith("cryptarithm")
-            and problem_id in symbolic_reasoning
-        ):
-            reasoning_text = symbolic_reasoning[problem_id]
 
         # Extract answer from reasoning's \boxed{} so they match
         boxed_match = re.findall(r"\\boxed\{([^}]*)\}", reasoning_text)
