@@ -9,6 +9,11 @@ val_report_*.json
 .pytest_cache/
 .ruff_cache/
 *.pyc
+
+# Kept rust cryptarithm generator: vendored solver source + built Rust accelerator wheel
+# (reusable asset; intentionally untracked-but-protected — see PROJECT_STATUS.md)
+/kaggle-nemotron-equation-symbolic-main/
+/dist/
 !train.csv
 !augmented.csv
 raw/
